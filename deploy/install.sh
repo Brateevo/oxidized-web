@@ -2,7 +2,7 @@
 # =============================================================================
 #  install.sh - ONE-SHOT DEPLOY of the full stack on a bare Linux server
 #
-#  Stack installed (mirrors the production reference at <SERVER_IP>):
+#  Stack installed (mirrors the production reference):
 #    * LibreNMS   - network/inventory monitoring  (git install, /opt/librenms)
 #    * MariaDB    - backend for LibreNMS + dedicated app read account
 #    * Oxidized   - config backup daemon (Ruby), REST API on 127.0.0.1:8888,
