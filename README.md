@@ -11,6 +11,7 @@ Web-интерфейс поверх **Oxidized** (резервное копир�
 | `config.example.php` | Шаблон конфигурации подключения к БД LibreNMS. **Скопируйте в `config.php`** и укажите свой пароль. Реальный `config.php` в git не попадает (`.gitignore`) |
 | `src/oxidized.php` | Ядро интеграции: REST-клиент Oxidized (`/nodes`, `/node/fetch`, версии, diff), helpers `oxz_sysname()` и `oxz_location()` для подтягивания имён/локаций из LibreNMS |
 | `public/index.php` | Единая точка входа (front-controller): роутер, таблица устройств, страницы конфига/версий/diff, контроли доступа по пользователям |
+| `apk/OxidizedMobile-v1.2.apk` | Готовое мобильное приложение OxidizedMobile (Android APK, v1.2) |
 | `.gitignore` | Исключает `config.php`, keystore'ы, кэши и локальные файлы сборки |
 
 ## Как это устроено (архитектура)
