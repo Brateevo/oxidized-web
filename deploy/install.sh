@@ -12,24 +12,11 @@
 #
 #  Target: Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 (amd64).
 #  Run as root:   sudo bash deploy/install.sh
+#  INTERACTIVE: the script asks for every value below (default shown in [..]).
+#               Empty password = random generation.
 #  Idempotent: rerun is safe (it detects already-created pieces).
 # =============================================================================
 set -Eeuo pipefail
-
-# ------------------------------------------------------------------ config ---
-# --- change these before running ---------------------------------------------
-LX_DB_NAME="librenms"                 # LibreNMS database
-LX_DB_USER="${LX_DB_USER:-librenms}"  # LibreNMS db user
-LX_DB_PASS="${LX_DB_PASS:-$(openssl rand -hex 16)}"   # auto random unless set
-APP_DB_USER="oxidized_web"            # read-only account used by oxidized-web
-APP_DB_PASS="${APP_DB_PASS:-$(openssl rand -hex 16)}"
-OX_HOST="127.0.0.1"                    # Oxidized REST listen host
-OX_PORT="8888"                         # Oxidized REST listen port
-OXWEB_PORT="8889"                      # oxidized-web nginx port
-LX_SITE_FQDN="${LX_SITE_FQDN:-$(hostname -I | awk '{print $1}')}" # LibreNMS listen IP/host
-OXWEB_FQDN="${OXWEB_FQDN:-${LX_SITE_FQDN}}"                            # oxidized-web listen IP/host
-OX_WEB_ADMIN_PASS="${OX_WEB_ADMIN_PASS:-admin12345}" # first oxidized-web admin (change!)
-LX_DEFAULT_GROUP="default"
 
 ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo checkout
 APP_DIR="/opt/oxidized-web"
@@ -38,6 +25,83 @@ C_N=$(tput sgr0); C_G=$(tput setaf 2); C_Y=$(tput setaf 3); C_R=$(tput setaf 1)
 log()  { echo -e "${C_G}[install]${C_N} $*"; }
 warn() { echo -e "${C_Y}[warn]${C_N} $*"; }
 die()  { echo -e "${C_R}[error]${C_N} $*" >&2; exit 1; }
+
+ask() { # ask "<prompt>" <varname> [default]
+    local prompt="$1" var="$2" def="${3:-}" val
+    read -r -p "$(tput bold)${prompt}${C_N} ${def:+[$def] }" val
+    printf -v "$var" '%s' "${val:-$def}"
+}
+
+ask_pass() { # ask_pass "<prompt>" <varname> <default>
+    local prompt="$1" var="$2" def="$3" p1 p2
+    while :; do
+        read -r -s -p "$(tput bold)${prompt}${C_N} (пусто = сгенерировать) "
+        p1="$REPLY"; echo
+        if [ -z "$p1" ]; then
+            p1="$def"
+            printf -v "$var" '%s' "$p1"
+            return
+        fi
+        read -r -s -p "  повторите: "
+        p2="$REPLY"; echo
+        [ "$p1" = "$p2" ] && { printf -v "$var" '%s' "$p1"; return; }
+        warn "Пароли не совпадают, попробуйте ещё раз."
+    done
+}
+
+# ------------------------------------------------------------------ wizard ---
+log "═══ Настройка стека (нажмите Enter = значение по умолчанию) ═══"
+
+LX_DB_NAME="librenms"
+ask "Имя БД LibreNMS?"            LX_DB_NAME       "librenms"
+ask "MySQL-логин для LibreNMS?"   LX_DB_USER       "librenms"
+ask_pass "Пароль MySQL-пользователя '${LX_DB_USER}':" LX_DB_PASS "$(openssl rand -hex 16)"
+
+APP_DB_USER="oxidized_web"
+ask "MySQL-аккаунт для oxidized-web (read-only)?" APP_DB_USER "oxidized_web"
+ask_pass "Пароль MySQL-пользователя '${APP_DB_USER}':" APP_DB_PASS "$(openssl rand -hex 16)"
+
+ask_pass "Пароль админа LibreNMS (web):"  LX_ADMIN_PASS   "$(openssl rand -hex 10)"
+ask "Логин админа LibreNMS (web)?"        LX_ADMIN_USER   "admin"
+ask "Email админа LibreNMS?"              LX_ADMIN_EMAIL  "admin@localhost"
+
+ask_pass "Пароль админа oxidized-web:"    OX_WEB_ADMIN_PASS "$(openssl rand -hex 10)"
+ask "Логин админа oxidized-web?"          OX_WEB_ADMIN_USER "admin"
+
+## ---- nginx / слушатели -----------------------------------------------------
+DEFAULT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+ask "IP/домен LibreNMS (nginx listen+server_name)?" LX_SITE_FQDN "$DEFAULT_IP"
+ask "Порт LibreNMS nginx?"               LX_SITE_PORT    "80"
+ask "IP/домен oxidized-web?"             OXWEB_FQDN      "${LX_SITE_FQDN}"
+ask "Порт oxidized-web nginx?"           OXWEB_PORT      "8889"
+ask "Oxidized REST host (bind)?"         OX_HOST         "127.0.0.1"
+ask "Oxidized REST порт?"                OX_PORT         "8888"
+ask "Группа Oxidized по умолчанию?"      LX_DEFAULT_GROUP "default"
+
+ask "FQDN для исходящих ссылок LibreNMS (base_url)?" LX_APP_URL "http://${LX_SITE_FQDN}"
+[ "${LX_SITE_PORT}" != "80" ] && LX_APP_URL="http://${LX_SITE_FQDN}:${LX_SITE_PORT}" || true
+
+warn "Значения приняты. Установка начнётся. Пароли при необходимости сохранит в /root/oxidized-web-deploy.secrets"
+cat > /root/oxidized-web-deploy.secrets <<SECF
+LX_DB_NAME=${LX_DB_NAME}
+LX_DB_USER=${LX_DB_USER}
+LX_DB_PASS=${LX_DB_PASS}
+APP_DB_USER=${APP_DB_USER}
+APP_DB_PASS=${APP_DB_PASS}
+LX_ADMIN_USER=${LX_ADMIN_USER}
+LX_ADMIN_PASS=${LX_ADMIN_PASS}
+LX_ADMIN_EMAIL=${LX_ADMIN_EMAIL}
+OX_WEB_ADMIN_USER=${OX_WEB_ADMIN_USER}
+OX_WEB_ADMIN_PASS=${OX_WEB_ADMIN_PASS}
+LX_SITE_FQDN=${LX_SITE_FQDN}
+LX_SITE_PORT=${LX_SITE_PORT}
+OXWEB_FQDN=${OXWEB_FQDN}
+OXWEB_PORT=${OXWEB_PORT}
+OX_HOST=${OX_HOST}
+OX_PORT=${OX_PORT}
+LX_DEFAULT_GROUP=${LX_DEFAULT_GROUP}
+SECF
+chmod 600 /root/oxidized-web-deploy.secrets
 
 # ------------------------------------------------------------------ guard -----
 [ "$(id -u)" = 0 ] || { echo "Run as root: sudo bash deploy/install.sh"; exit 1; }
@@ -98,7 +162,7 @@ if [ ! -d /opt/librenms/.git ]; then
 APP_NAME=LibreNMS
 APP_ENV=production
 APP_DEBUG=false
-APP_URL=${LX_SITE_FQDN}
+APP_URL=${LX_APP_URL}
 
 DB_HOST=localhost
 DB_PORT=3306
@@ -117,6 +181,14 @@ EOF
   sudo -u librenms php /opt/librenms/artisan key:generate --force  2>/dev/null || true
   sudo -u librenms php /opt/librenms/artisan migrate --force 2>&1 | tail -2 || \
     warn "migrate failed - rerun after services are up"
+  # first LibreNMS admin (official CLI helper; level 10 = admin)
+  if [ -f /opt/librenms/scripts/adduser.php ]; then
+    sudo -u librenms php /opt/librenms/scripts/adduser.php \
+        "${LX_ADMIN_USER}" "${LX_ADMIN_PASS}" "${LX_ADMIN_EMAIL}" 10 \
+        2>&1 | tail -2 || warn "adduser.php failed (rerun manually)"
+  else
+    warn "scripts/adduser.php not found - create admin in web UI"
+  fi
   # polling + discovery cron
   cat > /etc/cron.d/librenms <<'CRON'
 */5 * * * *   librenms  /opt/librenms/poller-wrapper.py 16 >> /dev/null 2>&1
@@ -170,7 +242,7 @@ security.limit_extensions = .php
 php_admin_value[open_basedir] = /opt/librenms/:/tmp/
 LIBPOOL
 
-sed -e 's/^    listen      80;/    listen      '"${LX_SITE_FQDN}:80"'/' \
+sed -e 's/^    listen      80;/    listen      '"${LX_SITE_FQDN}:${LX_SITE_PORT}"';/' \
     -e 's/server_name.*;/server_name '"${LX_SITE_FQDN}"';/' \
     "${ROOTDIR}/deploy/templates/nginx-librenms.conf" > /etc/nginx/conf.d/librenms.conf
 
@@ -222,7 +294,7 @@ output:
 source:
   default: http
   http:
-    url: http://127.0.0.1/api/v0/oxidized
+    url: http://${LX_SITE_FQDN}:${LX_SITE_PORT}/api/v0/oxidized
     scheme: http
     secure: false
     debug: false
@@ -309,10 +381,10 @@ if ! php -r '$d=new PDO("sqlite:/opt/oxidized-web/data/oxidized.db"); $n=(int)$d
     if(!is_dir($dir)){mkdir($dir,0770,true);}
     $d=new PDO("sqlite:".$dir."/oxidized.db");
     $d->exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT '\''user'\'', email TEXT NOT NULL DEFAULT '\'''\'', created_at TEXT NOT NULL DEFAULT (datetime('\''now'\'')), last_login TEXT DEFAULT NULL)");
-    $u="admin"; $p=password_hash($argv[1], PASSWORD_DEFAULT);
+    $u="$argv[2]"; $p=password_hash($argv[1], PASSWORD_DEFAULT);
     $s=$d->prepare("INSERT INTO users (username, password_hash, role) VALUES (?,?, '\''admin'\'')");
     $s->execute([$u,$p]); echo "created admin login=".$u."\n";
-  ' "${OX_WEB_ADMIN_PASS}" 2>&1 | grep -E "created admin|Fatal|Exception"
+  ' "${OX_WEB_ADMIN_PASS}" "${OX_WEB_ADMIN_USER}" 2>&1 | grep -E "created admin|Fatal|Exception"
 fi
 chown -R www-data:www-data /opt/oxidized-web
 
@@ -324,25 +396,27 @@ echo -n "mariadb:     "; systemctl is-active mariadb
 echo -n "redis:       "; systemctl is-active redis-server
 echo -n "oxidized:    "; systemctl is-active oxidized
 echo -n "librenms db: "; mysql -e "SELECT 1 FROM \`${LX_DB_NAME}\`.devices LIMIT 1" >/dev/null 2>&1 && echo OK || echo "(empty - fine)"
-curl -s -o /dev/null -w "LibreNMS  :80        -> HTTP %{http_code}\n"  "http://${OXWEB_FQDN}/" || true
+curl -s -o /dev/null -w "LibreNMS  :${LX_SITE_PORT}      -> HTTP %{http_code}\n"  "http://${OXWEB_FQDN}:${LX_SITE_PORT}/" || true
 curl -s -o /dev/null -w "oxidized-web :${OXWEB_PORT} -> HTTP %{http_code}\n" "http://${OXWEB_FQDN}:${OXWEB_PORT}/" || true
 
 log "== DONE ================================================================"
 cat <<SUMMARY
 
 Stack deployed:
-  LibreNMS      http://${LX_SITE_FQDN}/            (login as admin, set in its UI)
-  Oxidized REST http://127.0.0.1:${OX_PORT}
-  oxidized-web  http://${OXWEB_FQDN}:${OXWEB_PORT}/   login admin / ${OX_WEB_ADMIN_PASS}
+  LibreNMS      http://${LX_SITE_FQDN}:${LX_SITE_PORT}/   admin ${LX_ADMIN_USER} / (см. секреты)
+  Oxidized REST http://${OX_HOST}:${OX_PORT}
+  oxidized-web  http://${OXWEB_FQDN}:${OXWEB_PORT}/       admin ${OX_WEB_ADMIN_USER} / (см. секреты)
 
 MySQL accounts:
   ${LX_DB_USER} (all on ${LX_DB_NAME})  pass: ${LX_DB_PASS}
   ${APP_DB_USER} (SELECT only)          pass: ${APP_DB_PASS}
 
+Секреты сохранены: /root/oxidized-web-deploy.secrets (chmod 600)
+
 Remaining manual steps:
-  1. Finish LibreNMS web setup (create/create admin, add devices).
-  2. Devices show in Oxidized automatically (it pulls LibreNMS /api/v0/oxidized).
-  3. oxidized-web picks them up on next page load (name+location from MySQL).
-  4. Change device login/SSH credentials in /etc/oxidized/config (top block).
-  5. Put LibreNMS behind TLS if this box is exposed.
+  1. Зайдите в LibreNMS (admin из мастер-вопросов), добавьте устройства.
+  2. Устройства автоматически появятся в Oxidized (он читает /api/v0/oxidized).
+  3. oxidized-web подхватит их при открытии (имена/локации из MySQL).
+  4. Впишите рабочие SSH/ENABLE доступы в /etc/oxidized/config (верхний блок).
+  5. За TLS следите отдельно, если хост в открытом интернете.
 SUMMARY

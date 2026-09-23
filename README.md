@@ -104,16 +104,28 @@ Android-проект (Kotlin) и приложение на базе веб-пр�
 ## Развёртывание (кратко)
 
 ```bash
-# 1) скопировать файлы на веб-сервер (пример: /opt/oxidized-web)
-# 2) создать конфиг
-cp config.example.php config.php   # и вписать OX_LX_PASS
-
-# 3) права БД (см. выше), сделать документ-root на public/
-# 4) проверить синтаксис
-php -l src/oxidized.php && php -l public/index.php
-
-# 5) nginx: root → /opt/oxidized-web/public, PHP-FPM, порт 8889 (пример слушателя)
+# 1) склонировать репозиторий на целевой сервер
+# 2) запустить one-shot интерактивный установщик для голого Debian/Ubuntu
+sudo bash deploy/install.sh
 ```
 
-Требования: PHP 8.1+ (расширения `pdo_mysql`, `curl`, `mbstring`), доступ к MySQL LibreNMS,
-доступ по HTTP к Oxidized REST (`127.0.0.1:8888`).
+Установщик (`deploy/install.sh`) — **интерактивный мастер** и задаёт вопросы обо всех
+параметрах стека (принятые значения по умолчанию показаны в `[скобках]`, пустой ввод
+для пароля = автоматическая генерация):
+
+- MySQL: имя БД, пользователь и **пароль** для LibreNMS, read-only аккаунт
+  `oxidized_web` + его пароль;
+- **админ LibreNMS**: логин, пароль, email;
+- **админ oxidized-web**: логин и пароль;
+- **nginx**: IP/домен и порт для LibreNMS и для oxidized-web, host и порт Oxidized REST,
+  группа Oxidized, base_url.
+
+По полученным ответам скрипт сам генерирует: `.env` LibreNMS, `config.php` oxidized-web,
+`/etc/oxidized/config`, конфиги nginx (`deploy/templates/*`), пулы php-fpm, cron; затем
+ставит пакеты, создаёт БД и учётки, разворачивает приложение и при первом запуске
+создаёт администраторов обоих веб-интерфейсов.
+
+Все сгенерированные пароли сохраняются в `/root/oxidized-web-deploy.secrets`
+(`chmod 600`). Повторный запуск безопасен (идемпотентность: уже созданные части
+пропускаются). Требования: PHP 8.1+ (расширения `pdo_mysql`, `curl`, `mbstring`,
+`sqlite3`), доступ к MySQL LibreNMS, доступ по HTTP к Oxidized REST.
