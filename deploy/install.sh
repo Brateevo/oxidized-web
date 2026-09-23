@@ -141,11 +141,11 @@ mysql -e "FLUSH PRIVILEGES;"
 mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${APP_DB_PASS}';"
 mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'localhost' IDENTIFIED BY '${APP_DB_PASS}';"
 mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'%' IDENTIFIED BY '${APP_DB_PASS}';"
-mysql -e "GRANT SELECT ON \`librenms\`.* TO '${APP_DB_USER}'@'127.0.0.1';"
-mysql -e "GRANT SELECT ON \`librenms\`.\`locations\` TO '${APP_DB_USER}'@'localhost';"
-mysql -e "GRANT SELECT ON \`librenms\`.\`devices\`  TO '${APP_DB_USER}'@'localhost';"
-mysql -e "GRANT SELECT ON \`librenms\`.\`locations\` TO '${APP_DB_USER}'@'%';"
-mysql -e "GRANT SELECT ON \`librenms\`.\`devices\`  TO '${APP_DB_USER}'@'%';"
+# GRANT on db.* does not require tables to exist (unlike db.table, which trips
+# on "ERROR 1146 Table doesn't exist" before LibreNMS migrate has run in Phase 2)
+mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.* TO '${APP_DB_USER}'@'127.0.0.1';"
+mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.* TO '${APP_DB_USER}'@'localhost';"
+mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.* TO '${APP_DB_USER}'@'%';"
 mysql -e "FLUSH PRIVILEGES;"
 
 # =============================================================================
@@ -181,6 +181,10 @@ EOF
   sudo -u librenms php /opt/librenms/artisan key:generate --force  2>/dev/null || true
   sudo -u librenms php /opt/librenms/artisan migrate --force 2>&1 | tail -2 || \
     warn "migrate failed - rerun after services are up"
+  # table-level SELECT grants for the app (safe now: migrate created the tables)
+  mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`devices\`   TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
+  mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`locations\` TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
+  mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
   # first LibreNMS admin (official CLI helper; level 10 = admin)
   if [ -f /opt/librenms/scripts/adduser.php ]; then
     sudo -u librenms php /opt/librenms/scripts/adduser.php \
