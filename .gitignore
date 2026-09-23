@@ -1,0 +1,8 @@
+config.php
+*.keystore
+local.properties
+__pycache__/
+*.pyc
+.env
+vendor/
+node_modules/
