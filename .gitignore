@@ -6,3 +6,6 @@ __pycache__/
 .env
 vendor/
 node_modules/
+data/*.db
+data/*.db-*
+data/sessions/

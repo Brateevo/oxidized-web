@@ -1,0 +1,1 @@
+# directory kept so the app can create its runtime SQLite DB + sessions here
