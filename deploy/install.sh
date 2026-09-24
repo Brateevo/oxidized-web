@@ -162,8 +162,6 @@ apt-get update -y
 apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip \
     software-properties-common ca-certificates redis-server \
     nginx mariadb-server mariadb-client \
-    php-fpm php-cli php-cgi php-mysql php-curl php-gd php-xml php-mbstring \
-    php-sqlite3 php-redis php-bcmath php-gmp php-intl php-zip php-json \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
     composer 2>/dev/null || true
 # ruby + native-devel for the oxidized (rugged/libgit2) gem build.
@@ -178,11 +176,26 @@ apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
 # (Oxidized >=0.35 moved its REST API from "rest:" to the oxidized-web gem).
 apt-get install -y fping libicu-dev 2>/dev/null || true
 
-# PHP version autodetect
-PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+# --- newest PHP (8.3 is the distro max; add ondrej/php for 8.4 / 8.5+) -------
+# Ubuntu 24.04 only ships PHP 8.3 in its repos. To run the newest stable line
+# (8.4, 8.5 and later) we add the well-known sury.org PPA (ppa:ondrej/php),
+# then pick the greatest php<X.Y>-fpm version apt knows and install the
+# versioned modules for it. If the PPA is unreachable we fall back to 8.3.
+add-apt-repository -y ppa:ondrej/php 2>&1 | tail -1 || \
+  warn "ppa:ondrej/php could not be added - will use the distro PHP"
+apt-get update -y 2>/dev/null || true
+NEWEST_FPM="$(apt-cache search '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null | sed 's/-fpm.*//' | sort -V | tail -1)"
+PHP_VER="${NEWEST_FPM#php}"
+[ -n "$PHP_VER" ] || PHP_VER=8.3
 PHP_FPM_BIN="php${PHP_VER}-fpm"
-command -v "$PHP_FPM_BIN" || apt-get install -y "$PHP_FPM_BIN"
 SYSTEM_DEFAULT_PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"
+log "Using newest available PHP: ${PHP_VER} (${PHP_FPM_BIN})"
+apt-get install -y php${PHP_VER}-fpm php${PHP_VER}-cli php${PHP_VER}-mysql \
+    php${PHP_VER}-curl php${PHP_VER}-gd php${PHP_VER}-xml php${PHP_VER}-mbstring \
+    php${PHP_VER}-sqlite3 php${PHP_VER}-redis php${PHP_VER}-bcmath \
+    php${PHP_VER}-gmp php${PHP_VER}-intl php${PHP_VER}-zip 2>&1 | tail -3 || \
+  die "installing newest PHP ${PHP_VER} failed (check ppa:ondrej/php)"
+command -v "$PHP_FPM_BIN" || apt-get install -y "$PHP_FPM_BIN"
 
 # =============================================================================
 log "== Phase 1: MariaDB - databases and accounts ============================"
