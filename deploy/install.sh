@@ -326,6 +326,32 @@ else
   log "LibreNMS already present - skipping git setup"
 fi
 
+# ---- python deps for the poller/discovery wrappers ------------------------
+# poller-wrapper.py / discovery-wrapper.py import command_runner, psutil,
+# redis, PyMySQL, python-dotenv. Without them every cron poll crashes silently
+# and NO device is ever polled -> no RRD data -> empty graphs.
+# Ubuntu 24.04 ships an externally-managed pip, hence --break-system-packages.
+if [ -f /opt/librenms/requirements.txt ]; then
+  python3 -m pip install --break-system-packages -r /opt/librenms/requirements.txt 2>&1 | tail -1 || \
+    warn "python deps not installed - LibreNMS will not poll (graphs stay empty)"
+fi
+
+# ---- modern extras: maintenance scheduler + admin convenience --------------
+# LibreNMS 26 schedules its maintenance tasks through Laravel; validate.php
+# wants the .timer installed (runs "schedule:run" every minute). The 5-minute
+# poller/discovery runs stay on cron (poller-wrapper.py) - that is the way
+# LibreNMS 26 actually polls on a single-node install (schedule:run only holds
+# maintenance + operational-check tasks).
+if [ -f /opt/librenms/dist/librenms-scheduler.service ] && [ -f /opt/librenms/dist/librenms-scheduler.timer ]; then
+  cp /opt/librenms/dist/librenms-scheduler.service /opt/librenms/dist/librenms-scheduler.timer /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now librenms-scheduler.timer >/dev/null 2>&1 || true
+fi
+ln -sf /opt/librenms/lnms /usr/local/bin/lnms
+mkdir -p /etc/bash_completion.d
+cp /opt/librenms/misc/lnms-completion.bash /etc/bash_completion.d/ 2>/dev/null || true
+cp /opt/librenms/misc/librenms.logrotate /etc/logrotate.d/librenms 2>/dev/null || true
+
 # repair helper for pre-existing installs: APP_KEY in .env is mandatory
 grep -q '^APP_KEY=' /opt/librenms/.env 2>/dev/null || \
   echo "APP_KEY=base64:$(openssl rand -base64 32)" >> /opt/librenms/.env
@@ -372,8 +398,11 @@ su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/nu
 
 # LibreNMS nginx + fpm
 log "== Phase 3: nginx + php-fpm (LibreNMS) ================================="
-mkdir -p /opt/librenms/storage/rrd /opt/librenms/bootstrap/cache
+# rrd_dir (validate.php wants /opt/librenms/rrd on 0775; storage/rrd is the
+# newer default the graph code also uses) - both writable by the librenms user.
+mkdir -p /opt/librenms/rrd /opt/librenms/storage/rrd /opt/librenms/bootstrap/cache
 chown -R librenms:librenms /opt/librenms 2>/dev/null || true
+chmod 775 /opt/librenms/rrd
 
 cat > /etc/php/${PHP_VER}/fpm/pool.d/librenms.conf <<'LIBPOOL'
 [librenms]
