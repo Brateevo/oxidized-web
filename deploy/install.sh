@@ -23,7 +23,9 @@ set -Eeuo pipefail
 # under set -e a failing pipeline aborts silently (and with stdout redirected
 # to a file the last buffered lines can be lost), so log the exact failing
 # line to a dedicated file - makes automated runs truly diagnosable.
-trap '[ $? -ne 0 ] && { s=$?; echo ">> install.sh FAILED at ${BASH_SOURCE[0]}:${LINENO}, status=$s, cmd: ${BASH_COMMAND}" >> /tmp/oxidized-install-err.log 2>&1; } || true' ERR
+# NOTE: capture the status FIRST - the test expression would otherwise reset
+# $? and every entry would read "status=0".
+trap 'es=$?; if [ "$es" -ne 0 ]; then echo ">> install.sh FAILED at ${BASH_SOURCE[0]}:${LINENO}, status=$es, cmd: ${BASH_COMMAND}" >> /tmp/oxidized-install-err.log 2>&1; fi; true' ERR
 
 ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo checkout
 
@@ -102,20 +104,32 @@ if [ -f /root/oxidized-web-deploy.secrets ]; then
   . /root/oxidized-web-deploy.secrets
 fi
 
+# --- generate any still-missing secrets NOW, before the asks -----------------
+# A command substitution that fails inside a function argument silently
+# degrades to an EMPTY string, so an automated/non-tty run could end up with
+# empty passwords in /root/oxidized-web-deploy.secrets (seen live: all four
+# password defaults came back empty). Compute them here instead, and the guard
+# below turns any remaining empty secret into a loud error rather than an
+# insecure install.
+LX_DB_PASS="${LX_DB_PASS:-$(openssl rand -hex 16 2>/dev/null)}"
+APP_DB_PASS="${APP_DB_PASS:-$(openssl rand -hex 16 2>/dev/null)}"
+LX_ADMIN_PASS="${LX_ADMIN_PASS:-$(openssl rand -hex 10 2>/dev/null)}"
+OX_WEB_ADMIN_PASS="${OX_WEB_ADMIN_PASS:-$(openssl rand -hex 10 2>/dev/null)}"
+
 LX_DB_NAME="librenms"
 ask "Имя БД LibreNMS?"            LX_DB_NAME       "librenms"
 ask "MySQL-логин для LibreNMS?"   LX_DB_USER       "librenms"
-ask_pass "Пароль MySQL-пользователя '${LX_DB_USER}':" LX_DB_PASS "${LX_DB_PASS:-$(openssl rand -hex 16)}"
+ask_pass "Пароль MySQL-пользователя '${LX_DB_USER}':" LX_DB_PASS "$LX_DB_PASS"
 
 APP_DB_USER="oxidized_web"
 ask "MySQL-аккаунт для oxidized-web (read-only)?" APP_DB_USER "oxidized_web"
-ask_pass "Пароль MySQL-пользователя '${APP_DB_USER}':" APP_DB_PASS "${APP_DB_PASS:-$(openssl rand -hex 16)}"
+ask_pass "Пароль MySQL-пользователя '${APP_DB_USER}':" APP_DB_PASS "$APP_DB_PASS"
 
-ask_pass "Пароль админа LibreNMS (web):"  LX_ADMIN_PASS   "${LX_ADMIN_PASS:-$(openssl rand -hex 10)}" 8
+ask_pass "Пароль админа LibreNMS (web):"  LX_ADMIN_PASS   "$LX_ADMIN_PASS" 8
 ask "Логин админа LibreNMS (web)?"        LX_ADMIN_USER   "admin"
 ask "Email админа LibreNMS?"              LX_ADMIN_EMAIL  "admin@localhost"
 
-ask_pass "Пароль админа oxidized-web:"    OX_WEB_ADMIN_PASS "${OX_WEB_ADMIN_PASS:-$(openssl rand -hex 10)}" 8
+ask_pass "Пароль админа oxidized-web:"    OX_WEB_ADMIN_PASS "$OX_WEB_ADMIN_PASS" 8
 ask "Логин админа oxidized-web?"          OX_WEB_ADMIN_USER "admin"
 
 ## ---- nginx / слушатели -----------------------------------------------------
@@ -133,6 +147,12 @@ ask_pass "ENABLE-пароль устройства (опционально):"   
 
 ask "FQDN для исходящих ссылок LibreNMS (base_url)?" LX_APP_URL "http://${LX_SITE_FQDN}"
 [ "${LX_SITE_PORT}" != "80" ] && LX_APP_URL="http://${LX_SITE_FQDN}:${LX_SITE_PORT}" || true
+
+# every generated secret MUST be non-empty at this point - an empty LX_DB_PASS
+# or OX_WEB_ADMIN_PASS would silently yield an insecure install
+for v in LX_DB_PASS APP_DB_PASS LX_ADMIN_PASS OX_WEB_ADMIN_PASS OX_DV_PASS; do
+  [ -n "${!v}" ] || die "секреты не сгенерировались (пустое значение ${v}) - проверьте openssl, затем перезапустите установку"
+done
 
 warn "Значения приняты. Установка начнётся. Пароли при необходимости сохранит в /root/oxidized-web-deploy.secrets"
 cat > /root/oxidized-web-deploy.secrets <<SECF
