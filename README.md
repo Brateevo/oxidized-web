@@ -6,10 +6,13 @@ Web-интерфейс поверх **Oxidized** (резервное копир�
 
 ## Скриншоты
 
-| Страница | Скриншот |
-|----------|----------|
-| Вход (`/login`) | `docs/screenshots/oxidized-web-login.png` |
-| Дашборд устройств (`/`) — Имя / Локация / IP замаскированы | `docs/screenshots/oxidized-web-dashboard.png` |
+Страница входа (`/login`):
+
+![Вход — OxidizedWeb](docs/screenshots/oxidized-web-login.png)
+
+Дашборд устройств (`/`) — Имя / Локация / IP замаскированы (модель, время бэкапа и статус видны):
+
+![Дашборд устройств — OxidizedWeb](docs/screenshots/oxidized-web-dashboard.png)
 
 ## Состав репозитория
 
@@ -122,7 +125,7 @@ sudo bash deploy/install.sh
 - [ ] Добавить устройства в LibreNMS (`Devices → Add Device`).
 - [ ] Oxidized подхватит их автоматически через `/api/v0/oxidized` и начнёт бэкап.
 - [ ] Открыть `http://<IP>:8889` — в таблице устройств видны имя, модель, **Локация**, IP,
-      статус и время бэкапа.
+      статус и время бэкапа (см. [Скриншоты](#скриншоты)).
 - [ ] Вписать рабочие SSH/ENABLE доступы устройств в `/etc/oxidized/config` (верхний блок
       `username/password/vars.enable`) и перезапустить Oxidized.
 - [ ] Если хост доступен извне — настроить TLS (nginx) и ограничить порт 8889.
