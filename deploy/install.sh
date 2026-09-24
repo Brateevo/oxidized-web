@@ -251,8 +251,26 @@ grep -q '^APP_KEY=' /opt/librenms/.env 2>/dev/null || \
 
 # --- enable Oxidized integration inside LibreNMS config.php ------------------
 LX_CFG=/opt/librenms/config.php
-touch "$LX_CFG"
-grep -q "'oxidized'" "$LX_CFG" 2>/dev/null || cat >> "$LX_CFG" <<EOF
+# A fresh git clone (or empty/tag-less file) makes the stanzas below inert:
+# without the "<?php" open tag config.php is echoed as HTML, never executed,
+# so Oxidized never shows up in the LibreNMS UI. Write a complete valid file
+# when missing/empty/without open tag; otherwise append only what's absent.
+if [ ! -s "$LX_CFG" ] || ! grep -q '^<?php' "$LX_CFG" 2>/dev/null; then
+  {
+    echo '<?php'
+    echo ''
+    echo "\$config['oxidized']['enabled']   = true;"
+    echo "\$config['oxidized']['url']       = 'http://127.0.0.1:${OX_PORT}';"
+    echo "\$config['oxidized']['default_group'] = '${LX_DEFAULT_GROUP}';"
+    echo "\$config['oxidized']['features']['versioning'] = true;"
+    echo "\$config['oxidized']['groups'] = false;"
+    echo ''
+    echo "\$config['api']['enabled'] = true;"
+  } > "$LX_CFG"
+  chown librenms:librenms "$LX_CFG"
+  chmod 644 "$LX_CFG"
+else
+  grep -q "'oxidized'" "$LX_CFG" 2>/dev/null || cat >> "$LX_CFG" <<EOF
 
 // --- oxidized integration (added by deploy/install.sh) ---
 \$config['oxidized']['enabled']   = true;
@@ -261,11 +279,13 @@ grep -q "'oxidized'" "$LX_CFG" 2>/dev/null || cat >> "$LX_CFG" <<EOF
 \$config['oxidized']['features']['versioning'] = true;
 \$config['oxidized']['groups'] = false;
 EOF
-grep -q "api\['enabled'\]" "$LX_CFG" 2>/dev/null || cat >> "$LX_CFG" <<'EOF'
-
-// --- LibreNMS REST API (consumed by Oxidized for device list) ---
-$config['api']['enabled'] = true;
-EOF
+  grep -q "api\['enabled'\]" "$LX_CFG" 2>/dev/null || \
+    printf "\n\$config['api']['enabled'] = true;\n" >> "$LX_CFG"
+fi
+# ConfigRepository caches the merged settings (Laravel file cache). Without a
+# clear, a previously broken/empty config.php stays cached and Oxidized stays
+# hidden in the UI even after the file is fixed.
+su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/null 2>&1 || true
 
 # LibreNMS nginx + fpm
 log "== Phase 3: nginx + php-fpm (LibreNMS) ================================="
