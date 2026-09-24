@@ -14,6 +14,8 @@
 #  Run as root:   sudo bash deploy/install.sh
 #  INTERACTIVE: the script asks for every value below (default shown in [..]).
 #               Empty password = random generation.
+#               Last questions: SSH login/password (and optional ENABLE secret)
+#               Oxidized uses to read device configs.
 #  Idempotent: rerun is safe (it detects already-created pieces).
 # =============================================================================
 set -Eeuo pipefail
@@ -125,6 +127,9 @@ ask "Порт oxidized-web nginx?"           OXWEB_PORT      "8889"
 ask "Oxidized REST host (bind)?"         OX_HOST         "127.0.0.1"
 ask "Oxidized REST порт?"                OX_PORT         "8888"
 ask "Группа Oxidized по умолчанию?"      LX_DEFAULT_GROUP "default"
+ask "SSH-логин для чтения конфигов (Oxidized)?" OX_DV_USER "${OX_DV_USER:-oxidized}"
+ask_pass "Пароль устройства для Oxidized (SSH/telnet):" OX_DV_PASS "${OX_DV_PASS:-change_me_device_pass}"
+ask_pass "ENABLE-пароль устройства (опционально):"      OX_ENABLE   "${OX_ENABLE:-}"
 
 ask "FQDN для исходящих ссылок LibreNMS (base_url)?" LX_APP_URL "http://${LX_SITE_FQDN}"
 [ "${LX_SITE_PORT}" != "80" ] && LX_APP_URL="http://${LX_SITE_FQDN}:${LX_SITE_PORT}" || true
@@ -148,6 +153,9 @@ OXWEB_PORT=${OXWEB_PORT}
 OX_HOST=${OX_HOST}
 OX_PORT=${OX_PORT}
 LX_DEFAULT_GROUP=${LX_DEFAULT_GROUP}
+OX_DV_USER=${OX_DV_USER}
+OX_DV_PASS=${OX_DV_PASS}
+OX_ENABLE=${OX_ENABLE}
 SECF
 chmod 600 /root/oxidized-web-deploy.secrets
 
@@ -426,13 +434,17 @@ if [ -z "$OX_TOKEN" ]; then
     warn "could not create a LibreNMS API token for Oxidized"
   fi
 fi
+# yaml: 'vars:' with no children is invalid, so a bare 'vars: {}' is emitted
+# unless an ENABLE secret was provided (single password devices have none).
+ENABLE_LINE="vars: {}"
+[ -n "$OX_ENABLE" ] && ENABLE_LINE="vars:
+  enable: ${OX_ENABLE}"
 cat > /etc/oxidized/config <<EOF
 ---
-username: oxidized
-password: change_me_device_pass
+username: ${OX_DV_USER}
+password: ${OX_DV_PASS}
 resolve_dns: false
-vars:
-  enable: enable_secret
+${ENABLE_LINE}
 next_adds_job: true
 interval: 3600
 use_syslog: false
@@ -627,6 +639,8 @@ Remaining manual steps:
      no usable nodes") и автоматически повторяет попытку каждые 300 c —
      первого добавленного устройства достаточно, чтобы он поднялся.
   3. oxidized-web подхватит устройства при открытии (имена/локации из MySQL).
-  4. Впишите рабочие SSH/ENABLE доступы в /etc/oxidized/config (верхний блок).
+  4. Oxidized берёт SSH-доступ устройства из мастера установки
+     (OX_DV_USER / OX_DV_PASS / OX_ENABLE, см. /root/oxidized-web-deploy.secrets).
+     Если у отдельных устройств другие доступы - укажите их в /etc/oxidized/config (верхний блок).
   5. За TLS следите отдельно, если хост в открытом интернете.
 SUMMARY
