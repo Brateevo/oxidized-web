@@ -108,13 +108,22 @@ fi
 # A command substitution that fails inside a function argument silently
 # degrades to an EMPTY string, so an automated/non-tty run could end up with
 # empty passwords in /root/oxidized-web-deploy.secrets (seen live: all four
-# password defaults came back empty). Compute them here instead, and the guard
-# below turns any remaining empty secret into a loud error rather than an
-# insecure install.
-LX_DB_PASS="${LX_DB_PASS:-$(openssl rand -hex 16 2>/dev/null)}"
-APP_DB_PASS="${APP_DB_PASS:-$(openssl rand -hex 16 2>/dev/null)}"
-LX_ADMIN_PASS="${LX_ADMIN_PASS:-$(openssl rand -hex 10 2>/dev/null)}"
-OX_WEB_ADMIN_PASS="${OX_WEB_ADMIN_PASS:-$(openssl rand -hex 10 2>/dev/null)}"
+# password defaults came back empty because openssl is NOT installed on a bare
+# box - phase 0 installs it later). gen_secret prefers openssl and falls back
+# to /dev/urandom (od is in coreutils, always present); the guard below turns
+# any remaining empty secret into a loud error rather than an insecure install.
+gen_secret() {
+    local n="$1" out=""
+    if command -v openssl >/dev/null 2>&1; then
+        out="$(openssl rand -hex "$n" 2>/dev/null || true)"
+    fi
+    [ -n "$out" ] || out="$(od -An -N"$((n * 2))" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
+    printf '%s' "$out"
+}
+LX_DB_PASS="${LX_DB_PASS:-$(gen_secret 16)}"
+APP_DB_PASS="${APP_DB_PASS:-$(gen_secret 16)}"
+LX_ADMIN_PASS="${LX_ADMIN_PASS:-$(gen_secret 10)}"
+OX_WEB_ADMIN_PASS="${OX_WEB_ADMIN_PASS:-$(gen_secret 10)}"
 
 LX_DB_NAME="librenms"
 ask "Имя БД LibreNMS?"            LX_DB_NAME       "librenms"
@@ -188,7 +197,7 @@ log "== Phase 0: base packages ==============================================="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip \
-    software-properties-common ca-certificates redis-server \
+    software-properties-common ca-certificates openssl redis-server \
     nginx mariadb-server mariadb-client \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
     composer 2>/dev/null || true
