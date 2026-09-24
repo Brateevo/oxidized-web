@@ -336,6 +336,7 @@ if [ ! -s "$LX_CFG" ] || ! grep -q '^<?php' "$LX_CFG" 2>/dev/null; then
     echo "\$config['oxidized']['url']       = 'http://127.0.0.1:${OX_PORT}';"
     echo "\$config['oxidized']['default_group'] = '${LX_DEFAULT_GROUP}';"
     echo "\$config['oxidized']['features']['versioning'] = true;"
+    echo "\$config['oxidized']['reload_nodes'] = true;"
     echo "\$config['oxidized']['groups'] = false;"
     echo ''
     echo "\$config['api']['enabled'] = true;"
@@ -350,6 +351,7 @@ else
 \$config['oxidized']['url']       = 'http://127.0.0.1:${OX_PORT}';
 \$config['oxidized']['default_group'] = '${LX_DEFAULT_GROUP}';
 \$config['oxidized']['features']['versioning'] = true;
+\$config['oxidized']['reload_nodes'] = true;
 \$config['oxidized']['groups'] = false;
 EOF
   grep -q "api\['enabled'\]" "$LX_CFG" 2>/dev/null || \
@@ -470,6 +472,7 @@ source:
     scheme: http
     secure: false
     debug: false
+    reload_interval: 300
     delimiter: !ruby/regexp /:/
     map:
       name: hostname
