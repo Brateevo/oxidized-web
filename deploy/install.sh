@@ -42,6 +42,7 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default>
             printf -v "$var" '%s' "$p1"
             return
         fi
+        case "$p1" in *"'"*) warn "Пароль не должен содержать апостроф (')."; continue;; esac
         read -r -s -p "  повторите: "
         p2="$REPLY"; echo
         [ "$p1" = "$p2" ] && { printf -v "$var" '%s' "$p1"; return; }
@@ -119,10 +120,11 @@ apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
     composer 2>/dev/null || true
 # ruby + native-devel for the oxidized (rugged/libgit2) gem build.
-# libssh2-1-dev/libcurl4-openssl-dev are mandatory on Ubuntu 24.04, otherwise
-# "ERROR: Failed to build gem native extension" for rugged.
-apt-get install -y ruby ruby-dev build-essential libsqlite3-dev libssl-dev \
-    libssh2-1-dev libcurl4-openssl-dev 2>/dev/null || true
+# rugged vendors libgit2 and builds it with cmake; libssh2/libcurl are needed
+# for the SSH/HTTPS transports. Missing any of these -> "ERROR: Failed to build
+# gem native extension" when installing the oxidized gem.
+apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
+    libsqlite3-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev 2>/dev/null || true
 
 # PHP version autodetect
 PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
@@ -159,11 +161,14 @@ if [ ! -d /opt/librenms/.git ]; then
   git clone https://github.com/librenms/librenms.git /opt/librenms 2>/dev/null || \
     die "git clone of librenms failed"
   # .env with generated credentials (write BEFORE composer so artisan can work)
+  # APP_KEY is baked in here - "artisan key:generate" fails on a fresh .env and
+  # is not needed at all.
   cat > /opt/librenms/.env <<EOF
 APP_NAME=LibreNMS
 APP_ENV=production
 APP_DEBUG=false
 APP_URL=${LX_APP_URL}
+APP_KEY=base64:$(openssl rand -base64 32)
 
 DB_HOST=localhost
 DB_PORT=3306
@@ -183,33 +188,25 @@ EOF
   # breaks the post-autoload-dump hook -> composer exits non-zero)
   su -s /bin/bash librenms -c "cd /opt/librenms && php /usr/bin/composer install --no-dev --no-interaction --no-progress" \
       2>&1 | tail -3 || warn "composer install failed (rerun manually: su -s /bin/bash librenms -c 'composer install')"
-  # app key: try artisan, else drop a fresh one into .env
-  sudo -u librenms php /opt/librenms/artisan key:generate --force 2>/dev/null || {
-    grep -q '^APP_KEY=base64:' /opt/librenms/.env || \
-      echo "APP_KEY=base64:$(openssl rand -base64 32)" >> /opt/librenms/.env
-  }
-  # load schema + admin creation
-  sudo -u librenms php /opt/librenms/artisan migrate --force 2>&1 | tail -2 || \
+  # load schema (roles admin/global-read/user come from db:seed -> RolesSeeder)
+  su -s /bin/bash librenms -c "cd /opt/librenms && php artisan migrate --force" 2>&1 | tail -2 || \
     warn "migrate failed (maybe composer is broken; fix composer first)"
+  su -s /bin/bash librenms -c "cd /opt/librenms && php artisan db:seed --force" 2>&1 | tail -2 || \
+    warn "db:seed failed (roles may be missing; add the admin in the web UI)"
   # table-level SELECT grants for the app (safe now: migrate created the tables)
   mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`devices\`   TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
   mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`locations\` TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
   mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
-  # first LibreNMS admin (official CLI helper; level 10 = admin).
-  # NOTE: newer LibreNMS no longer ships scripts/adduser.php -> fallback SQL insert
-  if [ -f /opt/librenms/scripts/adduser.php ]; then
-    sudo -u librenms php /opt/librenms/scripts/adduser.php \
-        "${LX_ADMIN_USER}" "${LX_ADMIN_PASS}" "${LX_ADMIN_EMAIL}" 10 \
-        2>&1 | tail -2 || warn "adduser.php failed (falling back to SQL)"
-  else
-    warn "scripts/adduser.php not found -> creating admin via direct SQL"
-  fi
-  # SQL fallback: make sure the admin exists in the users table (bcrypt hash)
-  ADM_HASH="$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "${LX_ADMIN_PASS}")"
+  # first LibreNMS admin (official CLI: user:add --role=admin).
+  # NOTE: older LibreNMS used scripts/adduser.php and a users.level column; both
+  # are gone in the current role-based (Spatie) user model, which is why the
+  # raw-SQL insert previously died with "Unknown column 'level'".
   ADM_EXISTS="$(mysql -N -e "SELECT COUNT(*) FROM \`${LX_DB_NAME}\`.users WHERE username='${LX_ADMIN_USER}';" 2>/dev/null || echo 0)"
   if [ "${ADM_EXISTS}" = "0" ]; then
-    mysql -e "INSERT INTO \`${LX_DB_NAME}\`.users (username, password, realname, email, level, auth_type, can_modify_passwd) VALUES ('${LX_ADMIN_USER}', '${ADM_HASH}', '${LX_ADMIN_USER}', '${LX_ADMIN_EMAIL}', 10, 'mysql', 1);" \
-        2>&1 | tail -2 || warn "SQL admin insert failed (create admin in web UI)"
+    su -s /bin/bash librenms -c "cd /opt/librenms && php artisan user:add '${LX_ADMIN_USER}' --password='${LX_ADMIN_PASS}' --role=admin --email='${LX_ADMIN_EMAIL}' --full-name='${LX_ADMIN_USER}'" \
+      2>&1 | tail -3 || warn "user:add failed (create the admin in the LibreNMS web UI)"
+  else
+    log "LibreNMS admin '${LX_ADMIN_USER}' already exists - skipping creation"
   fi
   # polling + discovery cron
   cat > /etc/cron.d/librenms <<'CRON'
@@ -223,6 +220,10 @@ CRON
 else
   log "LibreNMS already present - skipping git setup"
 fi
+
+# repair helper for pre-existing installs: APP_KEY in .env is mandatory
+grep -q '^APP_KEY=' /opt/librenms/.env 2>/dev/null || \
+  echo "APP_KEY=base64:$(openssl rand -base64 32)" >> /opt/librenms/.env
 
 # --- enable Oxidized integration inside LibreNMS config.php ------------------
 LX_CFG=/opt/librenms/config.php
@@ -271,7 +272,11 @@ sed -e 's/^    listen      80;/    listen      '"${LX_SITE_FQDN}:${LX_SITE_PORT}
 # =============================================================================
 log "== Phase 4: Oxidized (Ruby daemon + REST :8888) ========================"
 if ! command -v oxidized >/dev/null 2>&1; then
-  gem install oxidized --no-document 2>&1 | tail -3 || die "gem install oxidized failed"
+  if ! gem install oxidized --no-document 2>&1 | tail -5; then
+    echo -e "\n[error] rugged (libgit2) native build failed. Last lines of gem_make.out:"
+    find /var/lib/gems -path '*/extensions/*' -name gem_make.out -exec tail -25 {} \; 2>/dev/null | tail -45
+    die "gem install oxidized failed (see the cmake/gcc error above)"
+  fi
 fi
 
 mkdir -p /etc/oxidized /home/oxidized/configs /home/oxidized/.config/oxidized

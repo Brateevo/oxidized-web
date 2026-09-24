@@ -67,9 +67,9 @@ sudo bash deploy/install.sh
 | **Пароль MySQL LibreNMS** | случайный | GRANT, `.env` |
 | MySQL-аккаунт oxidized-web (read-only) | `oxidized_web` | CREATE USER + GRANT SELECT, `config.php` |
 | **Пароль oxidized-web (MySQL)** | случайный | GRANT, `config.php` |
-| **Пароль админа LibreNMS** | случайный | `scripts/adduser.php` (уровень 10) |
-| Логин админа LibreNMS | `admin` | `scripts/adduser.php` |
-| Email админа LibreNMS | `admin@localhost` | `scripts/adduser.php` |
+| **Пароль админа LibreNMS** | случайный | `php artisan user:add --role=admin` |
+| Логин админа LibreNMS | `admin` | `php artisan user:add` |
+| Email админа LibreNMS | `admin@localhost` | `php artisan user:add` |
 | **Пароль админа oxidized-web** | случайный | SQLite `users` (при первом запуске) |
 | Логин админа oxidized-web | `admin` | SQLite `users` |
 | IP/домен LibreNMS (nginx) | первый IP хоста | `listen`, `server_name`, `.env APP_URL` |
