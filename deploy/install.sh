@@ -221,6 +221,17 @@ log "Using PHP: ${PHP_VER} (${PHP_FPM_BIN})"
 apt-get install -y $PHP_PKGS 2>&1 | tail -3 || \
   die "installing PHP ${PHP_VER} failed (check ppa:ondrej/php)"
 command -v "$PHP_FPM_BIN" || apt-get install -y "$PHP_FPM_BIN"
+# The META packages pulled in by other deps (e.g. apt 'composer' -> php-cli)
+# register the plain "php" alternative to the newest *meta* line, which may be
+# a newer line WITHOUT our drivers (pdo_mysql/pdo_sqlite/redis), so unversioned
+# "php" calls (artisan, php -r) would die with "could not find driver".
+# Pin the alternatives to OUR version so every "php" invocation uses the full
+# module set we installed above.
+if [ -x "/usr/bin/php${PHP_VER}" ] && command -v update-alternatives >/dev/null 2>&1; then
+  update-alternatives --set php "/usr/bin/php${PHP_VER}" 2>/dev/null || true
+  update-alternatives --set phar "/usr/bin/phar${PHP_VER}" 2>/dev/null || true
+  log "forced /usr/bin/php -> php${PHP_VER}"
+fi
 
 # =============================================================================
 log "== Phase 1: MariaDB - databases and accounts ============================"
