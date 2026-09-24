@@ -18,6 +18,11 @@
 # =============================================================================
 set -Eeuo pipefail
 
+# under set -e a failing pipeline aborts silently (and with stdout redirected
+# to a file the last buffered lines can be lost), so log the exact failing
+# line to a dedicated file - makes automated runs truly diagnosable.
+trap '[ $? -ne 0 ] && { s=$?; echo ">> install.sh FAILED at ${BASH_SOURCE[0]}:${LINENO}, status=$s, cmd: ${BASH_COMMAND}" >> /tmp/oxidized-install-err.log 2>&1; } || true' ERR
+
 ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo checkout
 APP_DIR="/opt/oxidized-web"
 
@@ -35,14 +40,21 @@ die()  { echo -e "${C_R}[error]${C_N} $*" >&2; exit 1; }
 
 ask() { # ask "<prompt>" <varname> [default]
     local prompt="$1" var="$2" def="${3:-}" val
-    read -r -p "${C_B}${prompt}${C_N} ${def:+[$def] }" val
+    # automated/redirected reruns (no tty) reuse values already loaded from
+    # /root/oxidized-web-deploy.secrets instead of pestering for input
+    if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
+    val=""
+    # EOF-safe: read returns 1 at end of input, which set -e must not treat as fatal
+    read -r -p "${C_B}${prompt}${C_N} ${def:+[$def] }" val || true
     printf -v "$var" '%s' "${val:-$def}"
 }
 
 ask_pass() { # ask_pass "<prompt>" <varname> <default>
     local prompt="$1" var="$2" def="$3" p1 p2
+    if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
     while :; do
-        read -r -s -p "${C_B}${prompt}${C_N} (пусто = сгенерировать) "
+        p1=""
+        read -r -s -p "${C_B}${prompt}${C_N} (пусто = сгенерировать) " || true
         p1="$REPLY"; echo
         if [ -z "$p1" ]; then
             p1="$def"
@@ -50,37 +62,50 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default>
             return
         fi
         case "$p1" in *"'"*) warn "Пароль не должен содержать апостроф (')."; continue;; esac
-        read -r -s -p "  повторите: "
+        p2=""
+        read -r -s -p "  повторите: " || true
         p2="$REPLY"; echo
         [ "$p1" = "$p2" ] && { printf -v "$var" '%s' "$p1"; return; }
         warn "Пароли не совпадают, попробуйте ещё раз."
+        # no tty (automated run): a mismatch would loop forever on EOF -> fall back
+        [ ! -t 0 ] || continue
+        printf -v "$var" '%s' "$def"
+        return
     done
 }
 
 # ------------------------------------------------------------------ wizard ---
 log "═══ Настройка стека (нажмите Enter = значение по умолчанию) ═══"
 
+# Reuse credentials/settings from a previous run so a rerun never churns the
+# DB passwords (the running stack keeps the old values, so keeping defaults
+# stable is what makes "rebuild after failure" honest).
+if [ -f /root/oxidized-web-deploy.secrets ]; then
+  # shellcheck source=/dev/null
+  . /root/oxidized-web-deploy.secrets
+fi
+
 LX_DB_NAME="librenms"
 ask "Имя БД LibreNMS?"            LX_DB_NAME       "librenms"
 ask "MySQL-логин для LibreNMS?"   LX_DB_USER       "librenms"
-ask_pass "Пароль MySQL-пользователя '${LX_DB_USER}':" LX_DB_PASS "$(openssl rand -hex 16)"
+ask_pass "Пароль MySQL-пользователя '${LX_DB_USER}':" LX_DB_PASS "${LX_DB_PASS:-$(openssl rand -hex 16)}"
 
 APP_DB_USER="oxidized_web"
 ask "MySQL-аккаунт для oxidized-web (read-only)?" APP_DB_USER "oxidized_web"
-ask_pass "Пароль MySQL-пользователя '${APP_DB_USER}':" APP_DB_PASS "$(openssl rand -hex 16)"
+ask_pass "Пароль MySQL-пользователя '${APP_DB_USER}':" APP_DB_PASS "${APP_DB_PASS:-$(openssl rand -hex 16)}"
 
-ask_pass "Пароль админа LibreNMS (web):"  LX_ADMIN_PASS   "$(openssl rand -hex 10)"
+ask_pass "Пароль админа LibreNMS (web):"  LX_ADMIN_PASS   "${LX_ADMIN_PASS:-$(openssl rand -hex 10)}"
 ask "Логин админа LibreNMS (web)?"        LX_ADMIN_USER   "admin"
 ask "Email админа LibreNMS?"              LX_ADMIN_EMAIL  "admin@localhost"
 
-ask_pass "Пароль админа oxidized-web:"    OX_WEB_ADMIN_PASS "$(openssl rand -hex 10)"
+ask_pass "Пароль админа oxidized-web:"    OX_WEB_ADMIN_PASS "${OX_WEB_ADMIN_PASS:-$(openssl rand -hex 10)}"
 ask "Логин админа oxidized-web?"          OX_WEB_ADMIN_USER "admin"
 
 ## ---- nginx / слушатели -----------------------------------------------------
 DEFAULT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-ask "IP/домен LibreNMS (nginx listen+server_name)?" LX_SITE_FQDN "$DEFAULT_IP"
+ask "IP/домен LibreNMS (nginx listen+server_name)?" LX_SITE_FQDN "${LX_SITE_FQDN:-$DEFAULT_IP}"
 ask "Порт LibreNMS nginx?"               LX_SITE_PORT    "80"
-ask "IP/домен oxidized-web?"             OXWEB_FQDN      "${LX_SITE_FQDN}"
+ask "IP/домен oxidized-web?"             OXWEB_FQDN      "${OXWEB_FQDN:-${LX_SITE_FQDN}}"
 ask "Порт oxidized-web nginx?"           OXWEB_PORT      "8889"
 ask "Oxidized REST host (bind)?"         OX_HOST         "127.0.0.1"
 ask "Oxidized REST порт?"                OX_PORT         "8888"
@@ -152,6 +177,7 @@ sleep 2
 # --- LibreNMS main db + user ---
 mysql -e "CREATE DATABASE IF NOT EXISTS \`${LX_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
 mysql -e "CREATE USER IF NOT EXISTS '${LX_DB_USER}'@'localhost' IDENTIFIED BY '${LX_DB_PASS}';"
+mysql -e "ALTER USER '${LX_DB_USER}'@'localhost' IDENTIFIED BY '${LX_DB_PASS}';"
 mysql -e "GRANT ALL PRIVILEGES ON \`${LX_DB_NAME}\`.* TO '${LX_DB_USER}'@'localhost';"
 mysql -e "FLUSH PRIVILEGES;"
 
@@ -159,6 +185,10 @@ mysql -e "FLUSH PRIVILEGES;"
 mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${APP_DB_PASS}';"
 mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'localhost' IDENTIFIED BY '${APP_DB_PASS}';"
 mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'%' IDENTIFIED BY '${APP_DB_PASS}';"
+# ALTER keeps the runtime password in sync with the secrets file on reruns
+mysql -e "ALTER USER '${APP_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${APP_DB_PASS}';"
+mysql -e "ALTER USER '${APP_DB_USER}'@'localhost' IDENTIFIED BY '${APP_DB_PASS}';"
+mysql -e "ALTER USER '${APP_DB_USER}'@'%' IDENTIFIED BY '${APP_DB_PASS}';"
 # GRANT on db.* does not require tables to exist (unlike db.table, which trips
 # on "ERROR 1146 Table doesn't exist" before LibreNMS migrate has run in Phase 2)
 mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.* TO '${APP_DB_USER}'@'127.0.0.1';"
@@ -339,9 +369,17 @@ chown -R oxidized:oxidized /home/oxidized
 # LibreNMS /api/v0/oxidized requires a valid API token, so one is created for
 # the LibreNMS admin below and injected into the source http headers.
 # (Reuse an existing token on reruns so reruns don't pile up DB tokens.)
-OX_TOKEN="$(sed -n "s/.*X-Auth-Token: '\([^']*\)'.*/\1/p" /etc/oxidized/config 2>/dev/null | head -1)"
+OX_TOKEN="$(sed -n "s/.*X-Auth-Token: '\([^']*\)'.*/\1/p" /etc/oxidized/config 2>/dev/null | head -1)" || true
 if [ -z "$OX_TOKEN" ]; then
-  OX_TOKEN="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan api:token-create '${LX_ADMIN_USER}' --name=oxidized 2>/dev/null" | awk '/^[0-9]+\|/{print; exit}')"
+  # pipefail-safe: a non-zero artisan exit must never abort the whole install
+  # (a silent pipeline failure under set -euo pipefail kills the run mid-phase).
+  # The error text is kept visible so a failure is diagnosable in the log.
+  OX_TOKEN="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan api:token-create '${LX_ADMIN_USER}' --name=oxidized" 2>&1 | awk '/^[0-9]+\|/{print; exit}')" || true
+  if [ -n "$OX_TOKEN" ]; then
+    echo ">> Oxidized API token created"
+  else
+    warn "could not create a LibreNMS API token for Oxidized"
+  fi
 fi
 cat > /etc/oxidized/config <<EOF
 ---
@@ -405,6 +443,14 @@ else
 fi
 chown -R oxidized:oxidized /etc/oxidized
 
+OXIDIZED_BIN="$(command -v oxidized || true)"
+if [ -z "$OXIDIZED_BIN" ]; then
+    for c in /usr/local/bin/oxidized /var/lib/gems/*/bin/oxidized /usr/lib/ruby/gems/*/bin/oxidized; do
+        [ -x "$c" ] && { OXIDIZED_BIN="$c"; break; }
+    done
+fi
+[ -n "$OXIDIZED_BIN" ] || warn "oxidized binary not found - supply ExecStart in /etc/systemd/system/oxidized.service"
+
 cat > /etc/systemd/system/oxidized.service <<UNIT
 [Unit]
 Description=Oxidized - Network Device Configuration Backup
@@ -412,7 +458,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=$(command -v oxidized)
+ExecStart=${OXIDIZED_BIN:-/usr/local/bin/oxidized}
 User=oxidized
 KillSignal=SIGKILL
 Environment="OXIDIZED_HOME=/etc/oxidized"
@@ -428,6 +474,7 @@ systemctl enable --now oxidized >/dev/null 2>&1 || warn "oxidized start delayed 
 # =============================================================================
 log "== Phase 5: oxidized-web PHP app (:${OXWEB_PORT}) ======================"
 [ -d /opt/oxidized-web ] || mkdir -p /opt/oxidized-web
+rm -rf /opt/oxidized-web/public /opt/oxidized-web/src
 cp -r "${ROOTDIR}/public" "${ROOTDIR}/src" /opt/oxidized-web/
 mkdir -p /opt/oxidized-web/data/sessions
 chown -R www-data:www-data /opt/oxidized-web
@@ -503,7 +550,7 @@ echo -n "oxidized:    "; systemctl is-active oxidized || true
 systemctl is-active oxidized >/dev/null 2>&1 || \
   warn "oxidized не активен: штатно, пока в LibreNMS нет устройств (см. шаг 2 в итогах)"
 echo -n "librenms db: "; mysql -e "SELECT 1 FROM \`${LX_DB_NAME}\`.devices LIMIT 1" >/dev/null 2>&1 && echo OK || echo "(empty - fine)"
-curl -s -o /dev/null -w "LibreNMS  :${LX_SITE_PORT}      -> HTTP %{http_code}\n"  "http://${OXWEB_FQDN}:${LX_SITE_PORT}/" || true
+curl -s -o /dev/null -w "LibreNMS  :${LX_SITE_PORT}      -> HTTP %{http_code}\n"  "http://${LX_SITE_FQDN}:${LX_SITE_PORT}/" || true
 curl -s -o /dev/null -w "oxidized-web :${OXWEB_PORT} -> HTTP %{http_code}\n" "http://${OXWEB_FQDN}:${OXWEB_PORT}/" || true
 
 log "== DONE ================================================================"
