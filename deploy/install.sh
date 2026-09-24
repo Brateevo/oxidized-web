@@ -117,8 +117,12 @@ apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip \
     php-fpm php-cli php-cgi php-mysql php-curl php-gd php-xml php-mbstring \
     php-sqlite3 php-redis php-bcmath php-gmp php-intl php-zip php-json \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
-    composer libapache2-mod-php 2>/dev/null || true
-apt-get install -y ruby ruby-dev build-essential libsqlite3-dev libssl-dev 2>/dev/null || true
+    composer 2>/dev/null || true
+# ruby + native-devel for the oxidized (rugged/libgit2) gem build.
+# libssh2-1-dev/libcurl4-openssl-dev are mandatory on Ubuntu 24.04, otherwise
+# "ERROR: Failed to build gem native extension" for rugged.
+apt-get install -y ruby ruby-dev build-essential libsqlite3-dev libssl-dev \
+    libssh2-1-dev libcurl4-openssl-dev 2>/dev/null || true
 
 # PHP version autodetect
 PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
@@ -154,10 +158,7 @@ if [ ! -d /opt/librenms/.git ]; then
   id librenms >/dev/null 2>&1 || useradd -r -M -d /opt/librenms -s /bin/bash librenms
   git clone https://github.com/librenms/librenms.git /opt/librenms 2>/dev/null || \
     die "git clone of librenms failed"
-  cd /opt/librenms
-  composer install --no-dev --no-interaction 2>&1 | tail -3 || \
-    warn "composer install had warnings (may be fine if retried)"
-  # .env with generated credentials
+  # .env with generated credentials (write BEFORE composer so artisan can work)
   cat > /opt/librenms/.env <<EOF
 APP_NAME=LibreNMS
 APP_ENV=production
@@ -178,20 +179,37 @@ REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 EOF
   chown -R librenms:librenms /opt/librenms
-  sudo -u librenms php /opt/librenms/artisan key:generate --force  2>/dev/null || true
+  # composer MUST run as the librenms user (running as root disables plugins and
+  # breaks the post-autoload-dump hook -> composer exits non-zero)
+  su -s /bin/bash librenms -c "cd /opt/librenms && php /usr/bin/composer install --no-dev --no-interaction --no-progress" \
+      2>&1 | tail -3 || warn "composer install failed (rerun manually: su -s /bin/bash librenms -c 'composer install')"
+  # app key: try artisan, else drop a fresh one into .env
+  sudo -u librenms php /opt/librenms/artisan key:generate --force 2>/dev/null || {
+    grep -q '^APP_KEY=base64:' /opt/librenms/.env || \
+      echo "APP_KEY=base64:$(openssl rand -base64 32)" >> /opt/librenms/.env
+  }
+  # load schema + admin creation
   sudo -u librenms php /opt/librenms/artisan migrate --force 2>&1 | tail -2 || \
-    warn "migrate failed - rerun after services are up"
+    warn "migrate failed (maybe composer is broken; fix composer first)"
   # table-level SELECT grants for the app (safe now: migrate created the tables)
   mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`devices\`   TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
   mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`locations\` TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
   mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
-  # first LibreNMS admin (official CLI helper; level 10 = admin)
+  # first LibreNMS admin (official CLI helper; level 10 = admin).
+  # NOTE: newer LibreNMS no longer ships scripts/adduser.php -> fallback SQL insert
   if [ -f /opt/librenms/scripts/adduser.php ]; then
     sudo -u librenms php /opt/librenms/scripts/adduser.php \
         "${LX_ADMIN_USER}" "${LX_ADMIN_PASS}" "${LX_ADMIN_EMAIL}" 10 \
-        2>&1 | tail -2 || warn "adduser.php failed (rerun manually)"
+        2>&1 | tail -2 || warn "adduser.php failed (falling back to SQL)"
   else
-    warn "scripts/adduser.php not found - create admin in web UI"
+    warn "scripts/adduser.php not found -> creating admin via direct SQL"
+  fi
+  # SQL fallback: make sure the admin exists in the users table (bcrypt hash)
+  ADM_HASH="$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "${LX_ADMIN_PASS}")"
+  ADM_EXISTS="$(mysql -N -e "SELECT COUNT(*) FROM \`${LX_DB_NAME}\`.users WHERE username='${LX_ADMIN_USER}';" 2>/dev/null || echo 0)"
+  if [ "${ADM_EXISTS}" = "0" ]; then
+    mysql -e "INSERT INTO \`${LX_DB_NAME}\`.users (username, password, realname, email, level, auth_type, can_modify_passwd) VALUES ('${LX_ADMIN_USER}', '${ADM_HASH}', '${LX_ADMIN_USER}', '${LX_ADMIN_EMAIL}', 10, 'mysql', 1);" \
+        2>&1 | tail -2 || warn "SQL admin insert failed (create admin in web UI)"
   fi
   # polling + discovery cron
   cat > /etc/cron.d/librenms <<'CRON'
