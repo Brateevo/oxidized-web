@@ -60,8 +60,8 @@ ask() { # ask "<prompt>" <varname> [default]
     printf -v "$var" '%s' "${val:-$def}"
 }
 
-ask_pass() { # ask_pass "<prompt>" <varname> <default>
-    local prompt="$1" var="$2" def="$3" p1 p2
+ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
+    local prompt="$1" var="$2" def="$3" minlen="${4:-0}" p1 p2
     if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
     while :; do
         p1=""
@@ -73,6 +73,10 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default>
             return
         fi
         case "$p1" in *"'"*) warn "Пароль не должен содержать апостроф (')."; continue;; esac
+        if [ "$minlen" -gt 0 ] && [ "${#p1}" -lt "$minlen" ]; then
+            warn "Минимум ${minlen} символов в пароле."
+            continue
+        fi
         p2=""
         read -r -s -p "  повторите: " || true
         p2="$REPLY"; echo
@@ -105,11 +109,11 @@ APP_DB_USER="oxidized_web"
 ask "MySQL-аккаунт для oxidized-web (read-only)?" APP_DB_USER "oxidized_web"
 ask_pass "Пароль MySQL-пользователя '${APP_DB_USER}':" APP_DB_PASS "${APP_DB_PASS:-$(openssl rand -hex 16)}"
 
-ask_pass "Пароль админа LibreNMS (web):"  LX_ADMIN_PASS   "${LX_ADMIN_PASS:-$(openssl rand -hex 10)}"
+ask_pass "Пароль админа LibreNMS (web):"  LX_ADMIN_PASS   "${LX_ADMIN_PASS:-$(openssl rand -hex 10)}" 8
 ask "Логин админа LibreNMS (web)?"        LX_ADMIN_USER   "admin"
 ask "Email админа LibreNMS?"              LX_ADMIN_EMAIL  "admin@localhost"
 
-ask_pass "Пароль админа oxidized-web:"    OX_WEB_ADMIN_PASS "${OX_WEB_ADMIN_PASS:-$(openssl rand -hex 10)}"
+ask_pass "Пароль админа oxidized-web:"    OX_WEB_ADMIN_PASS "${OX_WEB_ADMIN_PASS:-$(openssl rand -hex 10)}" 8
 ask "Логин админа oxidized-web?"          OX_WEB_ADMIN_USER "admin"
 
 ## ---- nginx / слушатели -----------------------------------------------------
@@ -268,8 +272,23 @@ EOF
   # raw-SQL insert previously died with "Unknown column 'level'".
   ADM_EXISTS="$(mysql -N -e "SELECT COUNT(*) FROM \`${LX_DB_NAME}\`.users WHERE username='${LX_ADMIN_USER}';" 2>/dev/null || echo 0)"
   if [ "${ADM_EXISTS}" = "0" ]; then
-    su -s /bin/bash librenms -c "cd /opt/librenms && php artisan user:add '${LX_ADMIN_USER}' --password='${LX_ADMIN_PASS}' --role=admin --email='${LX_ADMIN_EMAIL}' --full-name='${LX_ADMIN_USER}'" \
-      2>&1 | tail -3 || warn "user:add failed (create the admin in the LibreNMS web UI)"
+    # LibreNMS requires a >=8 char password: a short one (typed interactively,
+    # or saved by an older run and reloaded from the secrets file on rerun)
+    # makes user:add fail. Auto-heal: swap in a strong one and retry, then
+    # persist it so the next rerun keeps using a working password.
+    ADDED=0
+    for try in 1 2 3; do
+      RES="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan user:add '${LX_ADMIN_USER}' --password='${LX_ADMIN_PASS}' --role=admin --email='${LX_ADMIN_EMAIL}' --full-name='${LX_ADMIN_USER}'" 2>&1)" || true
+      echo "$RES" | tail -2
+      ADM_EXISTS="$(mysql -N -e "SELECT COUNT(*) FROM \`${LX_DB_NAME}\`.users WHERE username='${LX_ADMIN_USER}';" 2>/dev/null || echo 0)"
+      [ "${ADM_EXISTS}" != "0" ] && { ADDED=1; break; }
+      if [ "$try" -lt 3 ]; then
+        LX_ADMIN_PASS="$(openssl rand -hex 12)"
+        warn "user:add failed for '${LX_ADMIN_USER}' - retrying with a generated 24-char password"
+      fi
+    done
+    [ "$ADDED" = "1" ] || warn "user:add failed 3x (create '${LX_ADMIN_USER}' in the LibreNMS web UI)"
+    sed -i "s|^LX_ADMIN_PASS=.*|LX_ADMIN_PASS=${LX_ADMIN_PASS}|" /root/oxidized-web-deploy.secrets 2>/dev/null || true
   else
     log "LibreNMS admin '${LX_ADMIN_USER}' already exists - skipping creation"
   fi
@@ -485,8 +504,15 @@ systemctl enable --now oxidized >/dev/null 2>&1 || warn "oxidized start delayed 
 # =============================================================================
 log "== Phase 5: oxidized-web PHP app (:${OXWEB_PORT}) ======================"
 [ -d /opt/oxidized-web ] || mkdir -p /opt/oxidized-web
+# Copy the app sources into a staging dir FIRST: when the repo checkout IS
+# /opt/oxidized-web (git clone into the app dir) the rm -rf below would
+# otherwise delete the very files we are about to copy.
+STAGE="$(mktemp -d /tmp/oxweb-src.XXXXXX)"
+cp -r "${ROOTDIR}/public" "$STAGE/public"
+cp -r "${ROOTDIR}/src" "$STAGE/src"
 rm -rf /opt/oxidized-web/public /opt/oxidized-web/src
-cp -r "${ROOTDIR}/public" "${ROOTDIR}/src" /opt/oxidized-web/
+cp -r "$STAGE/public" "$STAGE/src" /opt/oxidized-web/
+rm -rf "$STAGE"
 mkdir -p /opt/oxidized-web/data/sessions
 chown -R www-data:www-data /opt/oxidized-web
 
