@@ -216,21 +216,27 @@ apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
 # (Oxidized >=0.35 moved its REST API from "rest:" to the oxidized-web gem).
 apt-get install -y fping libicu-dev 2>/dev/null || true
 
-# --- newest PHP (8.3 is the distro max; add ondrej/php for newer lines) ------
-# Ubuntu 24.04 only ships PHP 8.3 in its repos. To run the newest stable line
-# (8.4, 8.5, 8.6 and later) we add the well-known sury.org PPA (ppa:ondrej/php)
-# and pick the greatest php<X.Y> version whose FULL module set is available in
-# apt. A brand-new PHP line often lags a couple of modules (php-redis is usually
-# the last one to be rebuilt), so "newest" is tried first and we step back to
-# the previous line until a complete set is found. If the PPA is unreachable we
-# fall back to distro 8.3.
+# --- newest PHP (LibreNMS requires >= 8.4; recommended 8.5) -------------------
+# Official LibreNMS docs: "minimum supported PHP version is 8.4, the recommended
+# version is 8.5". Ubuntu 24.04 itself only ships PHP 8.3, so we add the
+# sury.org PPA (ppa:ondrej/php) to get 8.5+ lines and pick the greatest
+# php<X.Y> version >= 8.5 (falling back to 8.4) whose FULL module set is
+# available in apt. A brand-new PHP line often lags a couple of modules
+# (php-redis is usually the last one to be rebuilt), so "newest" is tried first
+# and we step back one line until a complete set >= 8.4 is found. If the PPA is
+# unreachable and no complete PHP >= 8.4 exists we abort - LibreNMS will NOT run
+# on PHP 8.3.
 add-apt-repository -y ppa:ondrej/php 2>&1 | tail -1 || \
-  warn "ppa:ondrej/php could not be added - will use the distro PHP"
+  warn "ppa:ondrej/php could not be added - only distro PHP lines will be seen"
 apt-get update -y 2>/dev/null || true
 PHP_MODULES="fpm cli mysql curl gd xml mbstring sqlite3 redis bcmath gmp intl zip"
 PHP_VER=""
 for cand in $(apt-cache search '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null | sed 's/-fpm.*//' | sort -Vr); do
   ver="${cand#php}"
+  # skip lines below the LibreNMS minimum (8.4)
+  if echo "$ver" | awk -F. '{exit ($1 > 8 || ($1 == 8 && $2 >= 4)) ? 1 : 0}'; then
+    continue
+  fi
   missing=""
   for mod in $PHP_MODULES; do
     apt-cache show "php${ver}-${mod}" >/dev/null 2>&1 || missing="$missing ${mod}"
@@ -242,8 +248,10 @@ for cand in $(apt-cache search '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null | sed 's/-f
   warn "PHP ${ver}: modules not built yet:$missing - stepping back one line"
 done
 if [ -z "$PHP_VER" ]; then
-  PHP_VER=8.3
-  warn "no complete PHP line found - falling back to distro 8.3"
+  die "no complete PHP >= 8.4 found - LibreNMS requires PHP 8.4+ (recommended 8.5). Add ppa:ondrej/php or use a newer distro"
+fi
+if [ "$PHP_VER" = "8.4" ]; then
+  warn "only PHP 8.4 is available - LibreNMS recommends 8.5"
 fi
 PHP_FPM_BIN="php${PHP_VER}-fpm"
 SYSTEM_DEFAULT_PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"

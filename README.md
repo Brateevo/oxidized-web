@@ -203,6 +203,6 @@ php -l src/oxidized.php && php -l public/index.php
 ## Требования и ограничения
 
 - Целевой хост: Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 (amd64), `apt-get`, root.
-- PHP 8.1+ с расширениями `pdo_mysql`, `curl`, `mbstring`, `sqlite3`.
+- PHP 8.4+ с расширениями `pdo_mysql`, `curl`, `mbstring`, `sqlite3` (минимальная версия по официальным требованиям LibreNMS; рекомендуется 8.5).
 - Установщик идемпотентен: повторный запуск безопасен, уже созданные части пропускаются.
 - Пароли не попадают в репозиторий: `config.php`, `.env`, `data/*.db` — в `.gitignore`.
