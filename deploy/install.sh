@@ -21,21 +21,28 @@ set -Eeuo pipefail
 ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo checkout
 APP_DIR="/opt/oxidized-web"
 
-C_N=$(tput sgr0); C_G=$(tput setaf 2); C_Y=$(tput setaf 3); C_R=$(tput setaf 1)
+# colours are optional: under a non-tty shell (ssh without -t, cron, piped
+# output) TERM is "unknown" and tput fails -> with set -e that would kill the
+# script, so fall back to plain text when there is no terminal.
+if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
+    C_B=$(tput bold); C_N=$(tput sgr0); C_G=$(tput setaf 2); C_Y=$(tput setaf 3); C_R=$(tput setaf 1)
+else
+    C_B=""; C_N=""; C_G=""; C_Y=""; C_R=""
+fi
 log()  { echo -e "${C_G}[install]${C_N} $*"; }
 warn() { echo -e "${C_Y}[warn]${C_N} $*"; }
 die()  { echo -e "${C_R}[error]${C_N} $*" >&2; exit 1; }
 
 ask() { # ask "<prompt>" <varname> [default]
     local prompt="$1" var="$2" def="${3:-}" val
-    read -r -p "$(tput bold)${prompt}${C_N} ${def:+[$def] }" val
+    read -r -p "${C_B}${prompt}${C_N} ${def:+[$def] }" val
     printf -v "$var" '%s' "${val:-$def}"
 }
 
 ask_pass() { # ask_pass "<prompt>" <varname> <default>
     local prompt="$1" var="$2" def="$3" p1 p2
     while :; do
-        read -r -s -p "$(tput bold)${prompt}${C_N} (пусто = сгенерировать) "
+        read -r -s -p "${C_B}${prompt}${C_N} (пусто = сгенерировать) "
         p1="$REPLY"; echo
         if [ -z "$p1" ]; then
             p1="$def"
@@ -253,8 +260,9 @@ cat > /etc/php/${PHP_VER}/fpm/pool.d/librenms.conf <<'LIBPOOL'
 user = librenms
 group = librenms
 listen = /run/php-fpm-librenms.sock
-listen.owner = nginx
-listen.group = nginx
+; nginx runs as www-data on Debian/Ubuntu (no system user "nginx" exists)
+listen.owner = www-data
+listen.group = www-data
 listen.mode = 0660
 pm = dynamic
 pm.max_children = 12
@@ -284,9 +292,13 @@ id oxidized >/dev/null 2>&1 || useradd -r -m -d /home/oxidized -s /bin/bash oxid
 chown -R oxidized:oxidized /home/oxidized
 
 # Oxidized pulls the device list from LibreNMS REST API.
-# An API token is optional-prod; LibreNMS accepts reads for the /api/v0/oxidized
-# endpoint with an enabled API. Adapt headers if your install requires a token:
-#   headers: X-Auth-Token: <your_librenms_api_token>
+# LibreNMS /api/v0/oxidized requires a valid API token, so one is created for
+# the LibreNMS admin below and injected into the source http headers.
+# (Reuse an existing token on reruns so reruns don't pile up DB tokens.)
+OX_TOKEN="$(sed -n "s/.*X-Auth-Token: '\([^']*\)'.*/\1/p" /etc/oxidized/config 2>/dev/null | head -1)"
+if [ -z "$OX_TOKEN" ]; then
+  OX_TOKEN="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan api:token-create '${LX_ADMIN_USER}' --name=oxidized 2>/dev/null" | awk '/^[0-9]+\|/{print; exit}')"
+fi
 cat > /etc/oxidized/config <<EOF
 ---
 username: oxidized
@@ -333,6 +345,12 @@ source:
 GROUPS: {}
 hooks: {}
 EOF
+# inject the API token into the http source block (matters for LibreNMS 401s)
+if [ -n "$OX_TOKEN" ]; then
+  sed -i "s/^GROUPS: {}/    headers:\n      X-Auth-Token: '${OX_TOKEN}'\nGROUPS: {}/" /etc/oxidized/config
+else
+  warn "No LibreNMS API token could be created - Oxidized cannot fetch devices (add X-Auth-Token to /etc/oxidized/config)"
+fi
 chown -R oxidized:oxidized /etc/oxidized
 
 cat > /etc/systemd/system/oxidized.service <<UNIT
@@ -399,6 +417,10 @@ sed -e "s/listen .*8889;/listen ${OXWEB_FQDN}:${OXWEB_PORT};/" \
 # =============================================================================
 log "== Phase 6: start services + first admin ================================"
 systemctl restart "php${PHP_VER}-fpm" nginx >/dev/null 2>&1 || true
+sleep 3
+# oxidized crashed early (LibreNMS wasn't up yet); restart it so it picks up
+# the freshly injected API token and the now-live LibreNMS API
+systemctl restart oxidized >/dev/null 2>&1 || true
 sleep 2
 
 # bootstrap first admin in oxidized-web (idempotent: only if users table empty)
@@ -417,11 +439,17 @@ chown -R www-data:www-data /opt/oxidized-web
 
 # =============================================================================
 log "== Verify ==============================================================="
-echo -n "nginx:       "; systemctl is-active nginx
-echo -n "php-fpm:     "; systemctl is-active "php${PHP_VER}-fpm"
-echo -n "mariadb:     "; systemctl is-active mariadb
-echo -n "redis:       "; systemctl is-active redis-server
-echo -n "oxidized:    "; systemctl is-active oxidized
+# note: systemctl is-active returns non-zero when a unit is not active, so
+# every call needs "|| true" - otherwise set -e would abort the verify block
+echo -n "nginx:       "; systemctl is-active nginx || true
+echo -n "php-fpm:     "; systemctl is-active "php${PHP_VER}-fpm" || true
+echo -n "mariadb:     "; systemctl is-active mariadb || true
+echo -n "redis:       "; systemctl is-active redis-server || true
+echo -n "oxidized:    "; systemctl is-active oxidized || true
+# oxidized intentionally stays down while LibreNMS has no devices (stock
+# behavior: "source returns no usable nodes"); it retries every 300s
+systemctl is-active oxidized >/dev/null 2>&1 || \
+  warn "oxidized не активен: штатно, пока в LibreNMS нет устройств (см. шаг 2 в итогах)"
 echo -n "librenms db: "; mysql -e "SELECT 1 FROM \`${LX_DB_NAME}\`.devices LIMIT 1" >/dev/null 2>&1 && echo OK || echo "(empty - fine)"
 curl -s -o /dev/null -w "LibreNMS  :${LX_SITE_PORT}      -> HTTP %{http_code}\n"  "http://${OXWEB_FQDN}:${LX_SITE_PORT}/" || true
 curl -s -o /dev/null -w "oxidized-web :${OXWEB_PORT} -> HTTP %{http_code}\n" "http://${OXWEB_FQDN}:${OXWEB_PORT}/" || true
@@ -442,8 +470,11 @@ MySQL accounts:
 
 Remaining manual steps:
   1. Зайдите в LibreNMS (admin из мастер-вопросов), добавьте устройства.
-  2. Устройства автоматически появятся в Oxidized (он читает /api/v0/oxidized).
-  3. oxidized-web подхватит их при открытии (имена/локации из MySQL).
+  2. Oxidized читает устройства из REST API LibreNMS. Пока в LibreNMS нет
+     ни одного устройства, демон штатно не держится в run ("source returns
+     no usable nodes") и автоматически повторяет попытку каждые 300 c —
+     первого добавленного устройства достаточно, чтобы он поднялся.
+  3. oxidized-web подхватит устройства при открытии (имена/локации из MySQL).
   4. Впишите рабочие SSH/ENABLE доступы в /etc/oxidized/config (верхний блок).
   5. За TLS следите отдельно, если хост в открытом интернете.
 SUMMARY
