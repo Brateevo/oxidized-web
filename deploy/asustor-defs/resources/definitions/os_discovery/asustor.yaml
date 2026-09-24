@@ -1,0 +1,80 @@
+modules:
+    os:
+        sysDescr_regex: '/Linux\s+(?<hardware>AS\d{4}Tv?\d*)/i'
+        serial: ASUSTOR-SYSTEM-MIB::sysSerialNumber.0
+        version: ASUSTOR-SYSTEM-MIB::sysADMVersion.0
+    processors:
+        data:
+            -
+                oid: ASUSTOR-SYSTEM-MIB::cpuTable
+                value: ASUSTOR-SYSTEM-MIB::cpuUsage
+                num_oid: '.1.3.6.1.4.1.44738.2.3.1.2.{{ $index }}'
+                descr: 'CPU {{ $index }}'
+                index: 'cpuUsage.{{ $index }}'
+                state_name: cpuUsage
+    sensors:
+        temperature:
+            data:
+                -
+                    oid: ASUSTOR-SYSTEM-MIB::temperatureTable
+                    value: ASUSTOR-SYSTEM-MIB::temperatureCpu
+                    num_oid: '.1.3.6.1.4.1.44738.2.5.1.2.{{ $index }}'
+                    descr: 'CPU'
+                    index: 'temperatureCpu.{{ $index }}'
+                    group: 'System'
+                -
+                    oid: ASUSTOR-DISK-MIB::diskTable
+                    value: ASUSTOR-DISK-MIB::diskTemperature
+                    num_oid: '.1.3.6.1.4.1.44738.4.1.1.7.{{ $index }}'
+                    descr: 'Disk {{ $index }} ({{ ASUSTOR-DISK-MIB::diskID }})'
+                    index: 'diskTemperature.{{ $index }}'
+                    group: 'Disks'
+        fanspeed:
+            data:
+                -
+                    oid: ASUSTOR-SYSTEM-MIB::fanTable
+                    value: ASUSTOR-SYSTEM-MIB::fanSpeed
+                    num_oid: '.1.3.6.1.4.1.44738.2.4.1.2.{{ $index }}'
+                    descr: 'Fan {{ $index }}'
+                    index: 'fanSpeed.{{ $index }}'
+                    group: 'System'
+        state:
+            data:
+                -
+                    oid: ASUSTOR-DISK-MIB::diskTable
+                    value: ASUSTOR-DISK-MIB::diskStatus
+                    num_oid: '.1.3.6.1.4.1.44738.4.1.1.5.{{ $index }}'
+                    descr: 'Disk {{ $index }} ({{ ASUSTOR-DISK-MIB::diskID }})'
+                    index: 'diskStatus.{{ $index }}'
+                    group: 'Disk Status'
+                    state_name: asustorDiskStatus
+                    states:
+                        - { value: 0, descr: 'Good', generic: 0 }
+                        - { value: 2, descr: 'Failed', generic: 2 }
+                        - { value: 3, descr: 'Unknown', generic: 3 }
+                -
+                    oid: ASUSTOR-DISK-MIB::diskTable
+                    value: ASUSTOR-DISK-MIB::diskSmartStatus
+                    num_oid: '.1.3.6.1.4.1.44738.4.1.1.6.{{ $index }}'
+                    descr: 'Disk {{ $index }} ({{ ASUSTOR-DISK-MIB::diskID }}) SMART'
+                    index: 'diskSmartStatus.{{ $index }}'
+                    group: 'Disk SMART'
+                    state_name: asustorDiskSmart
+                    states:
+                        - { value: 0, descr: 'Healthy', generic: 0 }
+                        - { value: 1, descr: 'Warning', generic: 1 }
+                        - { value: 2, descr: 'Abnormal', generic: 2 }
+                        - { value: 3, descr: 'Unknown', generic: 3 }
+                -
+                    oid: ASUSTOR-DISK-MIB::volumeTable
+                    value: ASUSTOR-DISK-MIB::volumeStatus
+                    num_oid: '.1.3.6.1.4.1.44738.5.1.1.4.{{ $index }}'
+                    descr: 'Volume {{ ASUSTOR-DISK-MIB::volumeName }}'
+                    index: 'volumeStatus.{{ $index }}'
+                    group: 'Volumes'
+                    state_name: asustorVolumeStatus
+                    states:
+                        - { value: 0, descr: 'healthy', generic: 0 }
+                        - { value: 1, descr: 'degraded', generic: 1 }
+                        - { value: 2, descr: 'failed', generic: 2 }
+                        - { value: 3, descr: 'Unknown', generic: 3 }

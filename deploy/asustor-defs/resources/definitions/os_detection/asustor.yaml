@@ -1,0 +1,25 @@
+os: asustor
+type: storage
+group: unix
+mib_dir: asustor
+text: 'Asustor NAS'
+icon: asustor
+processor_stacked: true
+over:
+    - { graph: device_processor, text: 'Processor Usage' }
+    - { graph: device_mempool, text: 'Memory Usage' }
+    - { graph: device_storage, text: 'Storage Usage' }
+poller_modules:
+    bgp-peers: false
+    mpls: false
+    ospf: false
+    stp: false
+    wireless: false
+discovery_modules:
+    bgp-peers: false
+    mpls: false
+    stp: false
+    wireless: false
+discovery:
+    -
+        sysDescr_regex: '/AS[0-9]{4}T/i'

@@ -35,6 +35,9 @@ ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo checkout
 for need in \
     deploy/templates/nginx-librenms.conf \
     deploy/templates/nginx-oxidized-web.conf \
+    deploy/asustor-defs/resources/definitions/os_detection/asustor.yaml \
+    deploy/asustor-defs/resources/definitions/os_discovery/asustor.yaml \
+    deploy/asustor-defs/mibs/asustor/ASUSTOR-SYSTEM-MIB.txt \
     public/index.php \
     src; do
     [ -e "${ROOTDIR}/${need}" ] || die "missing ${ROOTDIR}/${need} - copy the whole oxidized-web repo, not just install.sh"
@@ -412,6 +415,28 @@ cp /opt/librenms/misc/librenms.logrotate /etc/logrotate.d/librenms 2>/dev/null |
 # repair helper for pre-existing installs: APP_KEY in .env is mandatory
 grep -q '^APP_KEY=' /opt/librenms/.env 2>/dev/null || \
   echo "APP_KEY=base64:$(openssl rand -base64 32)" >> /opt/librenms/.env
+
+# ---- ASUSTOR custom OS definitions (mirror of the production box) ----------
+# Device 10.200.11.6 (Asustor NAS) is only matched as generic "linux" by
+# upstream LibreNMS; this box ships the same custom detection the prod host
+# uses (os_detection regex + os_discovery modules + MIBs + icon). Without them
+# the device shows up as linux/Generic ARMv8 instead of asustor/AS3302Tv2.
+# Idempotent: copies are overwritten on every run, so upstream upgrades cannot
+# silently "forget" the custom defs.
+if [ -f "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_detection/asustor.yaml" ]; then
+  cp -r "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_detection/" /opt/librenms/resources/definitions/
+  cp -r "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_discovery/" /opt/librenms/resources/definitions/
+  mkdir -p /opt/librenms/mibs
+  cp -r "${ROOTDIR}/deploy/asustor-defs/mibs/asustor" /opt/librenms/mibs/
+  [ -f "${ROOTDIR}/deploy/asustor-defs/html/images/os/asustor.svg" ] && \
+    cp "${ROOTDIR}/deploy/asustor-defs/html/images/os/asustor.svg" /opt/librenms/html/images/os/ 2>/dev/null || true
+  chown -R librenms:librenms \
+      /opt/librenms/resources/definitions/os_detection/asustor.yaml \
+      /opt/librenms/resources/definitions/os_discovery/asustor.yaml \
+      /opt/librenms/mibs/asustor \
+      /opt/librenms/html/images/os/asustor.svg 2>/dev/null || true
+  log "installed ASUSTOR OS definitions (os=asustor detection)"
+fi
 
 # --- enable Oxidized integration inside LibreNMS config.php ------------------
 LX_CFG=/opt/librenms/config.php
