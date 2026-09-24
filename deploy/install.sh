@@ -117,7 +117,7 @@ gen_secret() {
     if command -v openssl >/dev/null 2>&1; then
         out="$(openssl rand -hex "$n" 2>/dev/null || true)"
     fi
-    [ -n "$out" ] || out="$(od -An -N"$((n * 2))" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
+    [ -n "$out" ] || out="$(od -An -N"$n" -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
     printf '%s' "$out"
 }
 LX_DB_PASS="${LX_DB_PASS:-$(gen_secret 16)}"
