@@ -24,6 +24,17 @@ set -Eeuo pipefail
 trap '[ $? -ne 0 ] && { s=$?; echo ">> install.sh FAILED at ${BASH_SOURCE[0]}:${LINENO}, status=$s, cmd: ${BASH_COMMAND}" >> /tmp/oxidized-install-err.log 2>&1; } || true' ERR
 
 ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo checkout
+
+# The script needs the whole repo (nginx templates + PHP app sources), so
+# running it from a partial copy (only install.sh) fails deep in Phase 3/5
+# with cryptic errors. Refuse loudly and upfront instead.
+for need in \
+    deploy/templates/nginx-librenms.conf \
+    deploy/templates/nginx-oxidized-web.conf \
+    public/index.php \
+    src; do
+    [ -e "${ROOTDIR}/${need}" ] || die "missing ${ROOTDIR}/${need} - copy the whole oxidized-web repo, not just install.sh"
+done
 APP_DIR="/opt/oxidized-web"
 
 # colours are optional: under a non-tty shell (ssh without -t, cron, piped
