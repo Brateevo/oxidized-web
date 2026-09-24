@@ -24,7 +24,7 @@ Web-интерфейс поверх **Oxidized** (резервное копир�
 | `config.example.php` | Шаблон `config.php` oxidized-web. **Скопируйте в `config.php`** и укажите пароль. Реальный `config.php` в git не попадает (`.gitignore`) |
 | `src/oxidized.php` | Ядро интеграции: REST-клиент Oxidized (`/nodes`, `/node/fetch`, версии, diff), helpers `oxz_sysname()` и `oxz_location()` |
 | `public/index.php` | Front-controller: роутер, таблица устройств (`/`), `/config`, `/versions`, `/version`, `/diff`, `/users`, `/login` |
-| `apk/OxidizedMobile-v1.2.apk` | Готовое мобильное приложение OxidizedMobile (Android APK, v1.2) |
+| `apk/OxidizedMobile-v1.3.apk` | Готовое мобильное приложение OxidizedMobile (Android APK, v1.3) |
 | `.gitignore` | Исключает `config.php`, `.env`, БД (`data/*.db`), keystore'ы, кэши и локальные файлы |
 
 ## Как это устроено (архитектура)
@@ -196,7 +196,7 @@ php -l src/oxidized.php && php -l public/index.php
 
 ## Мобильное приложение
 
-`apk/OxidizedMobile-v1.2.apk` — собранный Android APK (веб-представление). Исходники
+`apk/OxidizedMobile-v1.3.apk` — собранный Android APK (веб-представление). Исходники
 мобильной части (`OxidizedMobile`, `OxidizedPWA`) в этом репозитории не хранятся —
 залит только готовый артефакт.
 
