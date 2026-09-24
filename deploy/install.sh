@@ -132,6 +132,11 @@ apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip \
 # gem native extension" when installing the oxidized gem.
 apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
     libsqlite3-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev 2>/dev/null || true
+# fping: LibreNMS availability/ping checks (DeviceIsPingable) exec it; without
+# it every device is "Could not ping" and gets added as down.
+# libicu-dev: builds charlock_holmes, a native dep of the oxidized-web gem
+# (Oxidized >=0.35 moved its REST API from "rest:" to the oxidized-web gem).
+apt-get install -y fping libicu-dev 2>/dev/null || true
 
 # PHP version autodetect
 PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
@@ -200,6 +205,18 @@ EOF
     warn "migrate failed (maybe composer is broken; fix composer first)"
   su -s /bin/bash librenms -c "cd /opt/librenms && php artisan db:seed --force" 2>&1 | tail -2 || \
     warn "db:seed failed (roles may be missing; add the admin in the web UI)"
+  # modern LibreNMS keeps runtime config in the DB ("config" table); the web
+  # installer creates it but a git install does not. Without it every config
+  # lookup throws "Table 'librenms.config' doesn't exist" and discovery/polling
+  # mark devices as down. Schema matches resources/definitions/schema/db_schema.yaml.
+  mysql "${LX_DB_NAME}" -e "CREATE TABLE IF NOT EXISTS config (
+    config_id int unsigned NOT NULL AUTO_INCREMENT,
+    config_name varchar(255) NOT NULL,
+    config_value mediumtext NOT NULL,
+    PRIMARY KEY (config_id),
+    UNIQUE KEY config_config_name_unique (config_name)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;" 2>/dev/null || \
+    warn "could not ensure the 'config' table exists (check mysql grants)"
   # table-level SELECT grants for the app (safe now: migrate created the tables)
   mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`devices\`   TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
   mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`locations\` TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
@@ -286,6 +303,13 @@ if ! command -v oxidized >/dev/null 2>&1; then
     die "gem install oxidized failed (see the cmake/gcc error above)"
   fi
 fi
+# Oxidized >=0.35: the former "rest:" built-in API moved to the oxidized-web
+# gem. Without it oxidized aborts with "oxidized-web not found" on startup.
+# libicu-dev (Phase 0) is required to build its charlock_holmes dependency.
+if ! gem list oxidized-web -i 2>/dev/null | grep -q true; then
+  gem install oxidized-web --no-document 2>&1 | tail -4 || \
+    warn "oxidized-web gem failed to install - REST API on :${OX_PORT} will not work"
+fi
 
 mkdir -p /etc/oxidized /home/oxidized/configs /home/oxidized/.config/oxidized
 id oxidized >/dev/null 2>&1 || useradd -r -m -d /home/oxidized -s /bin/bash oxidized
@@ -313,7 +337,15 @@ debug: false
 threads: 30
 timeout: 20
 retries: 3
-rest: ${OX_HOST}:${OX_PORT}
+
+extensions:
+  oxidized-web:
+    load: true
+    listen: ${OX_HOST}
+    port: ${OX_PORT}
+    hide_node_vars:
+      - enable
+      - password
 
 input:
   default: ssh, telnet
