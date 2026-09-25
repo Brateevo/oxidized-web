@@ -56,6 +56,7 @@ for need in \
     deploy/asustor-defs/resources/definitions/os_discovery/asustor.yaml \
     deploy/asustor-defs/mibs/asustor/ASUSTOR-SYSTEM-MIB.txt \
     deploy/asustor-defs/html/images/os/asustor.svg \
+    deploy/asustor-model/asustor.rb \
     public/index.php \
     src; do
     [ -e "${ROOTDIR}/${need}" ] || die "missing ${ROOTDIR}/${need} - copy the whole oxidized-web repo, not just install.sh"
@@ -909,9 +910,15 @@ GEM_VER_DIR="$(gem env home 2>/dev/null)"
 [ -n "$GEM_VER_DIR" ] && chmod -R a+rX "$GEM_VER_DIR"
 chmod -R a+rX /var/lib/gems 2>/dev/null || true
 
-mkdir -p /etc/oxidized /home/oxidized/configs /home/oxidized/.config/oxidized
+mkdir -p /etc/oxidized/model /home/oxidized/configs /home/oxidized/.config/oxidized
 id oxidized >/dev/null 2>&1 || useradd -r -m -d /home/oxidized -s /bin/bash oxidized
 chown -R oxidized:oxidized /home/oxidized
+
+# Custom Oxidized model for ASUSTOR NAS devices (LibreNMS reports os=asustor,
+# but 0.37.0 ships no such model, so Oxidized drops those nodes with
+# "ModelNotFound"). Install it under $OXIDIZED_HOME/model so Manager#loader
+# prefers the local copy over the gem dir.
+install -D -o oxidized -g oxidized -m 0644 "${ROOTDIR}/deploy/asustor-model/asustor.rb" /etc/oxidized/model/asustor.rb
 
 # Oxidized pulls the device list from LibreNMS REST API.
 # LibreNMS /api/v0/oxidized requires a valid API token, so one is created for

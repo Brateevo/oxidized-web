@@ -252,5 +252,6 @@ php -l src/oxidized.php && php -l public/index.php
 - Целевой хост: Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 (amd64), `apt-get`, root.
 - Требуется доступ к Ubuntu PPA `ondrej/php` на Ubuntu или репозиторию `packages.sury.org/php` на Debian; скрипт выбирает самую новую полную PHP-ветку от 8.5 и выше.
 - PHP 8.5+ с расширениями `pdo_mysql`, `curl`, `mbstring`, `sqlite3` (минимальная версия — 8.5 по официальным требованиям LibreNMS web).
+- Для устройств с `os=asustor` (LibreNMS) installer ставит кастомную модель `deploy/asustor-model/asustor.rb` в `$OXIDIZED_HOME/model/`, т.к. Oxidized 0.37 не содержит встроенной модели ASUSTOR.
 - Установщик идемпотентен: повторный запуск безопасен, уже созданные части пропускаются.
 - Пароли не попадают в репозиторий: `config.php`, `.env`, `data/*.db` — в `.gitignore`.
