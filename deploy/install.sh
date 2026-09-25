@@ -487,7 +487,7 @@ if [ -x "/usr/bin/php${PHP_VER}" ] && command -v update-alternatives >/dev/null 
 fi
 php -r 'exit((PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION) === $argv[1] ? 0 : 1);' "$PHP_VER" || die "CLI PHP version does not match installed FPM PHP ${PHP_VER}"
 
-apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip dialog \
+apt-get install -y curl wget git snmp snmpd rrdtool rrdcached whois net-tools unzip dialog \
     software-properties-common ca-certificates openssl redis-server cron \
     nginx mariadb-server mariadb-client \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
@@ -905,6 +905,31 @@ mkdir -p /opt/librenms/rrd /opt/librenms/storage/rrd /opt/librenms/bootstrap/cac
 chown -R librenms:librenms /opt/librenms
 chmod 775 /opt/librenms/rrd
 
+# rrdcached: LibreNMS' validate.php checks the daemon when distributed polling
+# is enabled (which is ON by default in modern LibreNMS). Without it every
+# validate reports FAIL "You have not enabled rrdcached" - and more importantly
+# without the daemon RRD writes fight each other under a multi-worker poller.
+# Ubuntu's rrdcached default config restricts writes to its OWN base dir and
+# gives the socket to root - both break LibreNMS, which writes into
+# /opt/librenms/rrd and runs as the librenms user. So: clear the -B base
+# restriction, keep a sane write/flush cadence and hand the socket to librenms.
+# (SOCKFILE defaults to /var/run/rrdcached.sock which symlinks to /run -
+#  LibreNMS is told exactly that path below via lnms config:set.)
+rrdcached_set() { sed -i "s/^#\?${1}=.*/${1}=${2}/" /etc/default/rrdcached; }
+rrdcached_set BASE_OPTIONS '""'
+rrdcached_set WRITE_TIMEOUT '600'
+rrdcached_set WRITE_JITTER '180'
+rrdcached_set WRITE_THREADS '4'
+rrdcached_set SOCKGROUP 'librenms'
+rrdcached_set SOCKMODE '0664'
+systemctl enable --now rrdcached
+sleep 1
+systemctl is-active rrdcached >/dev/null 2>&1 || die "rrdcached failed to start"
+# tell LibreNMS to read/write RRDs through the daemon (validate.php wants it)
+su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:set rrdcached unix:/run/rrdcached.sock" >/dev/null 2>&1 \
+  || die "failed to configure rrdcached in LibreNMS"
+[ -S /run/rrdcached.sock ] || die "rrdcached socket missing after startup"
+
 cat > /etc/php/${PHP_VER}/fpm/pool.d/librenms.conf <<'LIBPOOL'
 [librenms]
 user = librenms
@@ -1153,7 +1178,7 @@ chmod 640 /opt/oxidized-web/config.php
 # =============================================================================
 log "== Verify ==============================================================="
 CURRENT_PHASE="verification"
-for svc in nginx "php${PHP_VER}-fpm" mariadb redis-server cron librenms-scheduler.timer; do
+for svc in nginx "php${PHP_VER}-fpm" mariadb redis-server rrdcached cron librenms-scheduler.timer; do
   state="$(systemctl is-active "$svc" 2>/dev/null || true)"
   echo "${svc}: ${state:-inactive}"
   [ "$state" = active ] || die "required service ${svc} is not active"
