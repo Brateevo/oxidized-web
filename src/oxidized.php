@@ -287,7 +287,15 @@ function oxz_location(string $ip): string
         );
         $st->execute([$ip, $ip]);
         $r = $st->fetchColumn();
-        if ($r && $r !== '') { $v = (string)$r; }
+        if ($r && $r !== '') {
+            $v = (string)$r;
+            // LibreNMS stores locations as "name [lat, lng]" when the device
+            // has coordinates; show only the name, drop the bracketed pair.
+            $v = trim((string)preg_replace(
+                '~\[\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\]$~u', '', $v
+            ));
+            if ($v === '') { $v = '-'; }
+        }
     } catch (Throwable $e) {
         $v = '-';
     }
