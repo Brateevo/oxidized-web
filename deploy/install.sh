@@ -12,7 +12,9 @@
 #
 #  Target: Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 (amd64).
 #  Run as root:   sudo bash deploy/install.sh
-#  INTERACTIVE: the script asks for every value below (default shown in [..]).
+#  INTERACTIVE: the wizard asks for every value below (default shown in [..]).
+#               Rendered as dialog boxes (dialog/whiptail, iRedMail-style) on a
+#               tty, with a plain-prompt fallback for non-tty/rerun runs.
 #               Empty password = random generation.
 #               Last questions: SSH login/password (and optional ENABLE secret)
 #               Oxidized uses to read device configs, then map choices:
@@ -65,11 +67,70 @@ if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
     C_B=$(tput bold); C_N=$(tput sgr0); C_G=$(tput setaf 2); C_Y=$(tput setaf 3); C_R=$(tput setaf 1); C_BLU=$(tput setaf 4)
 fi
 
+# --- dialog/whiptail TUI -----------------------------------------------------
+# The wizard is rendered as dialog boxes (the look iRedMail uses: a blue title
+# bar, a message body and "< Yes > / < No >" buttons) when `dialog` or
+# `whiptail` is available on an interactive terminal. On a non-tty run, or a box
+# without either tool, every prompt falls back to a plain stdin read so
+# unattended/rerun installs keep working exactly as before.
+WT_TITLE="oxidized-web + LibreNMS setup"
+WT=""
+ensure_tui() {
+    command -v dialog >/dev/null 2>&1 && { WT=dialog; return; }
+    command -v whiptail >/dev/null 2>&1 && { WT=whiptail; return; }
+    [ -t 0 ] || return 0
+    command -v apt-get >/dev/null 2>&1 || return 0
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dialog >/dev/null 2>&1 \
+      || { DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1
+           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dialog >/dev/null 2>&1; } || true
+    command -v dialog >/dev/null 2>&1 && { WT=dialog; return; }
+    command -v whiptail >/dev/null 2>&1 && WT=whiptail
+    return 0
+}
+tui_ok() { [ -n "$WT" ] && [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; }
+
+tui_msg() { # tui_msg "<title>" "<text>"
+    tui_ok || return 0
+    "$WT" --title "$1" --msgbox "$2" 15 72 || true
+    return 0
+}
+
+tui_yesno() { # 0 = yes, 1 = no/cancel
+    tui_ok || return 1
+    "$WT" --title "$1" --yesno "$2" 15 72 && return 0
+    return 1
+}
+
+tui_input() { # "<prompt>" "<default>" -> stdout
+    local prompt="$1" def="$2" out
+    out=$("$WT" --title "$WT_TITLE" --inputbox "$prompt" 10 72 "$def" 3>&1 1>&2 2>&3) || out="$def"
+    printf '%s' "$out"
+}
+
+tui_password() { # "<prompt>" -> stdout (cancel -> empty)
+    local prompt="$1" out
+    out=$("$WT" --title "$WT_TITLE" --passwordbox "$prompt" 10 72 3>&1 1>&2 2>&3) || out=""
+    printf '%s' "$out"
+}
+
+tui_choice() { # "<prompt>" "<default>" <choice...> -> stdout
+    local prompt="$1" def="$2"; shift 2
+    local args=() c out
+    for c in "$@"; do args+=("$c" ""); done
+    out=$("$WT" --title "$WT_TITLE" --default-item "$def" --menu "$prompt" 15 72 8 "${args[@]}" 3>&1 1>&2 2>&3) || out="$def"
+    printf '%s' "$out"
+}
+
 ask() { # ask "<prompt>" <varname> [default]
     local prompt="$1" var="$2" def="${3:-}" val
     # automated/redirected reruns (no tty) reuse values already loaded from
     # /root/oxidized-web-deploy.secrets instead of pestering for input
     if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
+    if tui_ok; then
+        val="$(tui_input "$prompt" "${!var:-$def}")"
+        printf -v "$var" '%s' "${val:-${!var:-$def}}"
+        return
+    fi
     val=""
     # EOF-safe: read returns 1 at end of input, which set -e must not treat as fatal
     read -r -p "${C_B}${C_BLU}${prompt}${C_N} ${def:+[$def] }" val || true
@@ -80,6 +141,16 @@ ask_choice() { # ask_choice "<prompt>" <varname> "<choice1/choice2>" <default>
     local prompt="$1" var="$2" choices="$3" def="${4:-}" val
     # automated/redirected reruns (no tty) reuse loaded secrets
     if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
+    if tui_ok; then
+        local opts=()
+        read -ra opts <<< "${choices//\// }"
+        val="$(tui_choice "$prompt" "${!var:-$def}" "${opts[@]}")"
+        case "/${choices}/" in
+            */"$val"/*) printf -v "$var" '%s' "$val";;
+            *) printf -v "$var" '%s' "$def";;
+        esac
+        return
+    fi
     while :; do
         read -r -p "${C_B}${C_BLU}${prompt}${C_N} (${choices}) [${def}] " val || true
         val="${val:-$def}"
@@ -94,6 +165,22 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
     local prompt="$1" var="$2" def="$3" minlen="${4:-0}" p1 p2
     if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
     while :; do
+        if tui_ok; then
+            p1="$(tui_password "${prompt} (пусто = сгенерировать)")"
+            if [ -z "$p1" ]; then
+                printf -v "$var" '%s' "$def"
+                return
+            fi
+            case "$p1" in *"'"*) tui_msg "$WT_TITLE" "Пароль не должен содержать апостроф (')."; continue;; esac
+            if [ "$minlen" -gt 0 ] && [ "${#p1}" -lt "$minlen" ]; then
+                tui_msg "$WT_TITLE" "Минимум ${minlen} символов в пароле."
+                continue
+            fi
+            p2="$(tui_password "Повторите пароль")"
+            [ "$p1" = "$p2" ] && { printf -v "$var" '%s' "$p1"; return; }
+            tui_msg "$WT_TITLE" "Пароли не совпадают, попробуйте ещё раз."
+            continue
+        fi
         p1=""
         read -r -s -p "${C_B}${C_BLU}${prompt}${C_N} (пусто = сгенерировать) " || true
         p1="$REPLY"; echo
@@ -120,7 +207,22 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
 }
 
 # ------------------------------------------------------------------ wizard ---
-echo -e "${C_B}${C_BLU}═══ Настройка стека (Enter = значение по умолчанию) ═══${C_N}"
+ensure_tui
+if tui_ok; then
+    tui_yesno "Welcome and thanks for your use" \
+"Welcome to the oxidized-web + LibreNMS setup wizard.
+
+The wizard will ask a few simple questions required to deploy the stack:
+LibreNMS, Oxidized, oxidized-web, MariaDB, nginx + PHP-FPM.
+
+If you encounter any trouble or issues, please report them on our tracker:
+https://github.com/Brateevo/oxidized-web/issues
+
+NOTE: You can abort this installation wizard by pressing key ctrl-C." \
+      || { echo "Установка отменена."; exit 0; }
+else
+    echo -e "${C_B}${C_BLU}═══ Настройка стека (Enter = значение по умолчанию) ═══${C_N}"
+fi
 
 # Reuse credentials/settings from a previous run so a rerun never churns the
 # DB passwords (the running stack keeps the old values, so keeping defaults
@@ -252,6 +354,16 @@ for v in LX_DB_PASS APP_DB_PASS LX_ADMIN_PASS OX_WEB_ADMIN_PASS OX_DV_PASS; do
   [ -n "${!v}" ] || die "секреты не сгенерировались (пустое значение ${v}) - проверьте openssl, затем перезапустите установку"
 done
 
+if tui_ok; then
+  tui_yesno "$WT_TITLE" \
+"Все значения приняты. Сейчас будет развёрнут стек:
+LibreNMS, Oxidized, oxidized-web, MariaDB, nginx + PHP-FPM.
+
+Начать установку?
+
+(Пароли сохранятся в /root/oxidized-web-deploy.secrets)" \
+    || { echo "Установка отменена."; exit 0; }
+fi
 warn "Значения приняты. Установка начнётся. Пароли при необходимости сохранит в /root/oxidized-web-deploy.secrets"
 {
   printf 'LX_DB_NAME=%q\nLX_DB_USER=%q\nLX_DB_PASS=%q\n' "$LX_DB_NAME" "$LX_DB_USER" "$LX_DB_PASS"
@@ -268,7 +380,7 @@ log "== Phase 0: base packages ==============================================="
 CURRENT_PHASE="phase 0: packages and PHP"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip \
+apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip dialog \
     software-properties-common ca-certificates openssl redis-server cron \
     nginx mariadb-server mariadb-client \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
