@@ -528,6 +528,12 @@ sed -i \
   -e "s|^DB_DATABASE=.*|DB_DATABASE=${LX_DB_NAME}|" /opt/librenms/.env
 chmod 600 /opt/librenms/.env
 chown -R librenms:librenms /opt/librenms
+# umask is 077 here, so a fresh git clone would give /opt/librenms 700 directories
+# and 600 files - nginx (www-data) then cannot read the static assets and every
+# css/js/image request bounces to a redirect. Open read+traverse for the tree and
+# re-lock the credentials file right away.
+chmod -R a+rX /opt/librenms
+chmod 600 /opt/librenms/.env
 # composer MUST run as librenms; its failure is fatal because artisan/migrations
 # and the web UI cannot be trusted without the matching vendor dependencies.
 su -s /bin/bash librenms -c "cd /opt/librenms && php /usr/bin/composer install --no-dev --no-interaction --no-progress" \
@@ -864,7 +870,8 @@ pm.start_servers = 4
 pm.min_spare_servers = 2
 pm.max_spare_servers = 6
 security.limit_extensions = .php
-php_admin_value[open_basedir] = /opt/librenms/:/tmp/
+; LibreNMS calls external binaries (snmp, rrdtool, fping, ping...) for polling
+; and debugging, so open_basedir must NOT be restricted to the app tree here.
 LIBPOOL
 
 sed -e 's/^    listen      80;/    listen      '"${LX_LISTEN_ADDR}:${LX_SITE_PORT}"';/' \
@@ -887,6 +894,14 @@ fi
 if ! gem list oxidized-web -i 2>/dev/null | grep -q true; then
   gem install oxidized-web --no-document 2>&1 | tail -5 || die "oxidized-web gem failed to install"
 fi
+# The daemon runs as the unprivileged "oxidized" user (User=oxidized). With the
+# global umask 077 at the top of this script, gem install created
+# /var/lib/gems/<ver>/{gems,specifications} as 700 root, so rubygems could not
+# read the gemspecs from a systemd service and oxidized aborted with
+# "can't find gem oxidized". Open read+traverse on the gem tree.
+GEM_VER_DIR="$(gem env home 2>/dev/null)"
+[ -n "$GEM_VER_DIR" ] && chmod -R a+rX "$GEM_VER_DIR"
+chmod -R a+rX /var/lib/gems 2>/dev/null || true
 
 mkdir -p /etc/oxidized /home/oxidized/configs /home/oxidized/.config/oxidized
 id oxidized >/dev/null 2>&1 || useradd -r -m -d /home/oxidized -s /bin/bash oxidized
