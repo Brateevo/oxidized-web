@@ -130,6 +130,26 @@ sudo bash deploy/install.sh
       `username/password/vars.enable`) и перезапустить Oxidized.
 - [ ] Если хост доступен извне — настроить TLS (nginx) и ограничить порт 8889.
 
+### Яндекс-карта в LibreNMS
+
+В картах LibreNMS настроена подложка **Yandex Maps** (`leaflet.tile_url`):
+
+```
+https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z={z}&scale=1&lang=ru_RU
+```
+
+- Тайлы Яндекса отдаются в **эллипсоидном** меркаторе (EPSG:3395), а Leaflet по
+  умолчанию рисует их в сферическом (EPSG:3857) — без коррекции маркеры и карта
+  смещены примерно на 0.18° широты (≈20 км к северу).
+- В `html/js/librenms.js` добавлен кастомный CRS `L.CRS.EPSG3395` (forward/unproject
+  на эллипсоиде WGS84), который включается автоматически для URL
+  `core-renderer-tiles.maps.yandex.net` и передаётся в `L.map(id, { crs })`.
+- Страница полноэкранной карты `/maps/fullscreenmap` отдаёт `tile_url` в конфиг
+  карты через `@json(...)`, поэтому Яндекс-подложка работает и там.
+
+> Внимание: правки в `html/js/librenms.js` и `FullscreenMapController.php` перезапишутся
+> при обновлении LibreNMS (`git pull`/апгрейд) — после обновления нужно повторить патч.
+
 ## Ручная установка (если стек уже стоит)
 
 Если LibreNMS + Oxidized уже есть — развернуть только oxidized-web:
