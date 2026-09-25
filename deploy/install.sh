@@ -16,45 +16,52 @@
 #               Empty password = random generation.
 #               Last questions: SSH login/password (and optional ENABLE secret)
 #               Oxidized uses to read device configs.
-#  Idempotent: rerun is safe (it detects already-created pieces).
+#  Idempotent: rerun reapplies migrations/config and validates the stack.
 # =============================================================================
 set -Eeuo pipefail
+umask 077
 
-# under set -e a failing pipeline aborts silently (and with stdout redirected
-# to a file the last buffered lines can be lost), so log the exact failing
-# line to a dedicated file - makes automated runs truly diagnosable.
-# NOTE: capture the status FIRST - the test expression would otherwise reset
-# $? and every entry would read "status=0".
-trap 'es=$?; if [ "$es" -ne 0 ]; then echo ">> install.sh FAILED at ${BASH_SOURCE[0]}:${LINENO}, status=$es, cmd: ${BASH_COMMAND}" >> /tmp/oxidized-install-err.log 2>&1; fi; true' ERR
+C_B=""; C_N=""; C_G=""; C_Y=""; C_R=""
+log()  { echo -e "${C_G}[install]${C_N} $*"; }
+warn() { echo -e "${C_Y}[warn]${C_N} $*"; }
+die()  { echo -e "${C_R}[error]${C_N} $*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || { echo "Run as root: sudo bash deploy/install.sh" >&2; exit 1; }
+command -v apt-get >/dev/null || die "This script targets Debian/Ubuntu (apt-get)."
+# Log only location/status, never BASH_COMMAND (it may contain credentials).
+ERR_LOG="$(mktemp /var/log/oxidized-web-install.XXXXXX)"
+chmod 600 "$ERR_LOG"
+CURRENT_PHASE="preflight"
+trap 'es=$?; if [ "$es" -ne 0 ]; then printf ">> install.sh FAILED phase=%s at %s:%s, status=%s\n" "$CURRENT_PHASE" "${BASH_SOURCE[0]}" "${LINENO}" "$es" >> "$ERR_LOG"; fi' EXIT
+log "Failure diagnostics (no command/secret values): ${ERR_LOG}"
+. /etc/os-release
+case "${ID}:${VERSION_ID}" in
+    ubuntu:22.04|ubuntu:24.04|debian:12) ;;
+    *) die "Unsupported OS ${PRETTY_NAME:-${ID} ${VERSION_ID}}. Supported: Debian 12, Ubuntu 22.04/24.04." ;;
+esac
+[ "$(dpkg --print-architecture)" = amd64 ] || die "Only amd64 is supported."
 
 ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo checkout
 
 # The script needs the whole repo (nginx templates + PHP app sources), so
-# running it from a partial copy (only install.sh) fails deep in Phase 3/5
-# with cryptic errors. Refuse loudly and upfront instead.
+# running it from a partial copy must fail before writing secrets or packages.
 for need in \
     deploy/templates/nginx-librenms.conf \
     deploy/templates/nginx-oxidized-web.conf \
     deploy/asustor-defs/resources/definitions/os_detection/asustor.yaml \
     deploy/asustor-defs/resources/definitions/os_discovery/asustor.yaml \
     deploy/asustor-defs/mibs/asustor/ASUSTOR-SYSTEM-MIB.txt \
+    deploy/asustor-defs/html/images/os/asustor.svg \
     public/index.php \
     src; do
     [ -e "${ROOTDIR}/${need}" ] || die "missing ${ROOTDIR}/${need} - copy the whole oxidized-web repo, not just install.sh"
 done
 APP_DIR="/opt/oxidized-web"
 
-# colours are optional: under a non-tty shell (ssh without -t, cron, piped
-# output) TERM is "unknown" and tput fails -> with set -e that would kill the
-# script, so fall back to plain text when there is no terminal.
+# colours are optional under a non-tty shell.
 if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
     C_B=$(tput bold); C_N=$(tput sgr0); C_G=$(tput setaf 2); C_Y=$(tput setaf 3); C_R=$(tput setaf 1)
-else
-    C_B=""; C_N=""; C_G=""; C_Y=""; C_R=""
 fi
-log()  { echo -e "${C_G}[install]${C_N} $*"; }
-warn() { echo -e "${C_Y}[warn]${C_N} $*"; }
-die()  { echo -e "${C_R}[error]${C_N} $*" >&2; exit 1; }
 
 ask() { # ask "<prompt>" <varname> [default]
     local prompt="$1" var="$2" def="${3:-}" val
@@ -102,9 +109,14 @@ log "═══ Настройка стека (нажмите Enter = значе�
 # Reuse credentials/settings from a previous run so a rerun never churns the
 # DB passwords (the running stack keeps the old values, so keeping defaults
 # stable is what makes "rebuild after failure" honest).
-if [ -f /root/oxidized-web-deploy.secrets ]; then
+if [ -e /root/oxidized-web-deploy.secrets ]; then
+  [ -f /root/oxidized-web-deploy.secrets ] || die "secrets path is not a regular file"
+  [ "$(stat -c %u /root/oxidized-web-deploy.secrets)" = 0 ] || die "secrets file must be owned by root"
+  [ "$(stat -c %a /root/oxidized-web-deploy.secrets)" = 600 ] || die "secrets file must have mode 600"
   # shellcheck source=/dev/null
   . /root/oxidized-web-deploy.secrets
+elif [ -e /opt/oxidized-web/data/oxidized.db ] || [ -e /opt/librenms/.env ]; then
+  die "existing installation found but /root/oxidized-web-deploy.secrets is missing; restore it before rerunning to avoid credential drift"
 fi
 
 # --- generate any still-missing secrets NOW, before the asks -----------------
@@ -128,12 +140,12 @@ APP_DB_PASS="${APP_DB_PASS:-$(gen_secret 16)}"
 LX_ADMIN_PASS="${LX_ADMIN_PASS:-$(gen_secret 10)}"
 OX_WEB_ADMIN_PASS="${OX_WEB_ADMIN_PASS:-$(gen_secret 10)}"
 
-LX_DB_NAME="librenms"
+LX_DB_NAME="${LX_DB_NAME:-librenms}"
 ask "Имя БД LibreNMS?"            LX_DB_NAME       "librenms"
 ask "MySQL-логин для LibreNMS?"   LX_DB_USER       "librenms"
 ask_pass "Пароль MySQL-пользователя '${LX_DB_USER}':" LX_DB_PASS "$LX_DB_PASS"
 
-APP_DB_USER="oxidized_web"
+APP_DB_USER="${APP_DB_USER:-oxidized_web}"
 ask "MySQL-аккаунт для oxidized-web (read-only)?" APP_DB_USER "oxidized_web"
 ask_pass "Пароль MySQL-пользователя '${APP_DB_USER}':" APP_DB_PASS "$APP_DB_PASS"
 
@@ -154,11 +166,60 @@ ask "Oxidized REST host (bind)?"         OX_HOST         "127.0.0.1"
 ask "Oxidized REST порт?"                OX_PORT         "8888"
 ask "Группа Oxidized по умолчанию?"      LX_DEFAULT_GROUP "default"
 ask "SSH-логин для чтения конфигов (Oxidized)?" OX_DV_USER "${OX_DV_USER:-oxidized}"
-ask_pass "Пароль устройства для Oxidized (SSH/telnet):" OX_DV_PASS "${OX_DV_PASS:-change_me_device_pass}"
+OX_DV_PASS="${OX_DV_PASS:-$(gen_secret 16)}"
+ask_pass "Пароль устройства для Oxidized (SSH/telnet):" OX_DV_PASS "$OX_DV_PASS"
 ask_pass "ENABLE-пароль устройства (опционально):"      OX_ENABLE   "${OX_ENABLE:-}"
 
-ask "FQDN для исходящих ссылок LibreNMS (base_url)?" LX_APP_URL "http://${LX_SITE_FQDN}"
-[ "${LX_SITE_PORT}" != "80" ] && LX_APP_URL="http://${LX_SITE_FQDN}:${LX_SITE_PORT}" || true
+APP_URL_DEFAULT="http://${LX_SITE_FQDN}"
+[ "${LX_SITE_PORT}" = "80" ] || APP_URL_DEFAULT="http://${LX_SITE_FQDN}:${LX_SITE_PORT}"
+ask "FQDN для исходящих ссылок LibreNMS (base_url)?" LX_APP_URL "${LX_APP_URL:-$APP_URL_DEFAULT}"
+
+# Values are embedded in SQL, YAML, URLs, and generated PHP. Restrict them to
+# deliberately supported characters rather than risking broken config/injection.
+valid_ident() { [[ "$1" =~ ^[A-Za-z0-9_]+$ ]]; }
+valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+valid_secret() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._@%+=,:!/-]*$ ]]; }
+valid_host() {
+  local host="$1" label octet
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$host" != .* && "$host" != *. && "$host" != *..* ]] || return 1
+  IFS=. read -r -a labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [ ${#label} -le 63 ] && [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+  done
+  if [[ "$host" =~ ^[0-9.]+$ ]]; then
+    [ "${#labels[@]}" -eq 4 ] || return 1
+    for octet in "${labels[@]}"; do
+      [[ "$octet" =~ ^[0-9]{1,3}$ ]] && [ "$octet" -le 255 ] || return 1
+    done
+  fi
+}
+valid_email() { [[ "$1" = "admin@localhost" || "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
+nginx_listen_addr() { [[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]] && printf '%s' "$1" || printf '0.0.0.0'; }
+valid_ident "$LX_DB_NAME" && valid_ident "$LX_DB_USER" && valid_ident "$APP_DB_USER" || die "DB names/users may contain only letters, digits, underscore."
+[ "$LX_DB_USER" != "$APP_DB_USER" ] || die "LibreNMS and oxidized-web must use separate MySQL accounts."
+[[ "$LX_DB_USER" != root && "$APP_DB_USER" != root ]] || die "Do not use the MariaDB root account for applications."
+valid_ident "$LX_ADMIN_USER" && valid_ident "$OX_WEB_ADMIN_USER" && valid_ident "$OX_DV_USER" || die "User names may contain only letters, digits, underscore."
+valid_email "$LX_ADMIN_EMAIL" || die "Invalid LibreNMS admin email address."
+valid_host "$LX_SITE_FQDN" && valid_host "$OXWEB_FQDN" || die "IP/domain must contain only a hostname or IPv4 address."
+valid_port "$LX_SITE_PORT" && valid_port "$OXWEB_PORT" && valid_port "$OX_PORT" || die "Ports must be integers from 1 to 65535."
+[ "$LX_SITE_PORT" != "$OXWEB_PORT" ] && [ "$LX_SITE_PORT" != "$OX_PORT" ] && [ "$OXWEB_PORT" != "$OX_PORT" ] || die "LibreNMS, oxidized-web and Oxidized must use different ports."
+[[ "$OX_HOST" = 127.0.0.1 || "$OX_HOST" = localhost ]] || die "Oxidized REST is unauthenticated; it must bind only to 127.0.0.1 or localhost."
+[[ "$LX_DEFAULT_GROUP" =~ ^[A-Za-z0-9_.-]+$ ]] || die "Oxidized default group may contain only letters, digits, dot, underscore, and hyphen."
+if [[ "$LX_APP_URL" =~ ^https?://([^/:]+)(:([0-9]{1,5}))?/?$ ]]; then
+  APP_URL_HOST="${BASH_REMATCH[1]}"
+  APP_URL_PORT="${BASH_REMATCH[3]:-}"
+  valid_host "$APP_URL_HOST" || die "Invalid hostname in LibreNMS base URL."
+  [ -z "$APP_URL_PORT" ] || valid_port "$APP_URL_PORT" || die "Invalid port in LibreNMS base URL."
+else
+  die "LibreNMS base URL must be http(s)://hostname[:port]."
+fi
+LX_LISTEN_ADDR="$(nginx_listen_addr "$LX_SITE_FQDN")"
+OXWEB_LISTEN_ADDR="$(nginx_listen_addr "$OXWEB_FQDN")"
+for v in LX_DB_PASS APP_DB_PASS LX_ADMIN_PASS OX_WEB_ADMIN_PASS OX_DV_PASS; do
+  valid_secret "${!v}" || die "${v} contains unsupported characters; use letters, digits, and . _ @ % + = , : ! / -"
+done
+[ -z "$OX_ENABLE" ] || valid_secret "$OX_ENABLE" || die "ENABLE password contains unsupported characters."
+[[ ${#LX_ADMIN_PASS} -ge 8 && ${#OX_WEB_ADMIN_PASS} -ge 8 ]] || die "LibreNMS and oxidized-web admin passwords must be at least 8 characters."
 
 # every generated secret MUST be non-empty at this point - an empty LX_DB_PASS
 # or OX_WEB_ADMIN_PASS would silently yield an insecure install
@@ -167,54 +228,36 @@ for v in LX_DB_PASS APP_DB_PASS LX_ADMIN_PASS OX_WEB_ADMIN_PASS OX_DV_PASS; do
 done
 
 warn "Значения приняты. Установка начнётся. Пароли при необходимости сохранит в /root/oxidized-web-deploy.secrets"
-cat > /root/oxidized-web-deploy.secrets <<SECF
-LX_DB_NAME=${LX_DB_NAME}
-LX_DB_USER=${LX_DB_USER}
-LX_DB_PASS=${LX_DB_PASS}
-APP_DB_USER=${APP_DB_USER}
-APP_DB_PASS=${APP_DB_PASS}
-LX_ADMIN_USER=${LX_ADMIN_USER}
-LX_ADMIN_PASS=${LX_ADMIN_PASS}
-LX_ADMIN_EMAIL=${LX_ADMIN_EMAIL}
-OX_WEB_ADMIN_USER=${OX_WEB_ADMIN_USER}
-OX_WEB_ADMIN_PASS=${OX_WEB_ADMIN_PASS}
-LX_SITE_FQDN=${LX_SITE_FQDN}
-LX_SITE_PORT=${LX_SITE_PORT}
-OXWEB_FQDN=${OXWEB_FQDN}
-OXWEB_PORT=${OXWEB_PORT}
-OX_HOST=${OX_HOST}
-OX_PORT=${OX_PORT}
-LX_DEFAULT_GROUP=${LX_DEFAULT_GROUP}
-OX_DV_USER=${OX_DV_USER}
-OX_DV_PASS=${OX_DV_PASS}
-OX_ENABLE=${OX_ENABLE}
-SECF
+{
+  printf 'LX_DB_NAME=%q\nLX_DB_USER=%q\nLX_DB_PASS=%q\n' "$LX_DB_NAME" "$LX_DB_USER" "$LX_DB_PASS"
+  printf 'APP_DB_USER=%q\nAPP_DB_PASS=%q\nLX_ADMIN_USER=%q\nLX_ADMIN_PASS=%q\nLX_ADMIN_EMAIL=%q\n' "$APP_DB_USER" "$APP_DB_PASS" "$LX_ADMIN_USER" "$LX_ADMIN_PASS" "$LX_ADMIN_EMAIL"
+  printf 'OX_WEB_ADMIN_USER=%q\nOX_WEB_ADMIN_PASS=%q\nLX_SITE_FQDN=%q\nLX_SITE_PORT=%q\n' "$OX_WEB_ADMIN_USER" "$OX_WEB_ADMIN_PASS" "$LX_SITE_FQDN" "$LX_SITE_PORT"
+  printf 'OXWEB_FQDN=%q\nOXWEB_PORT=%q\nOX_HOST=%q\nOX_PORT=%q\nLX_DEFAULT_GROUP=%q\n' "$OXWEB_FQDN" "$OXWEB_PORT" "$OX_HOST" "$OX_PORT" "$LX_DEFAULT_GROUP"
+  printf 'LX_APP_URL=%q\nOX_DV_USER=%q\nOX_DV_PASS=%q\nOX_ENABLE=%q\n' "$LX_APP_URL" "$OX_DV_USER" "$OX_DV_PASS" "$OX_ENABLE"
+} > /root/oxidized-web-deploy.secrets
 chmod 600 /root/oxidized-web-deploy.secrets
-
-# ------------------------------------------------------------------ guard -----
-[ "$(id -u)" = 0 ] || { echo "Run as root: sudo bash deploy/install.sh"; exit 1; }
-command -v apt-get >/dev/null || die "This script targets Debian/Ubuntu (apt-get)."
 
 # =============================================================================
 log "== Phase 0: base packages ==============================================="
+CURRENT_PHASE="phase 0: packages and PHP"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip \
-    software-properties-common ca-certificates openssl redis-server \
+    software-properties-common ca-certificates openssl redis-server cron \
     nginx mariadb-server mariadb-client \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
-    composer 2>/dev/null || true
+    composer
 # ruby + native-devel for the oxidized (rugged/libgit2) gem build.
 # rugged vendors libgit2 and builds it with cmake; libssh2/libcurl are needed
 # for the SSH/HTTPS transports. Missing any of these -> "ERROR: Failed to build
 # gem native extension" when installing the oxidized gem.
 apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
-    libsqlite3-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev 2>/dev/null || true
+    libsqlite3-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
 # fping: LibreNMS availability/ping checks (DeviceIsPingable) exec it; without
 # it every device is "Could not ping" and gets added as down.
 # libicu-dev: builds charlock_holmes, a native dep of the oxidized-web gem
 # (Oxidized >=0.35 moved its REST API from "rest:" to the oxidized-web gem).
-apt-get install -y fping libicu-dev 2>/dev/null || true
+apt-get install -y fping libicu-dev
 
 # --- newest PHP (LibreNMS requires >= 8.4; recommended 8.5) -------------------
 # Official LibreNMS docs: "minimum supported PHP version is 8.4, the recommended
@@ -225,13 +268,19 @@ apt-get install -y fping libicu-dev 2>/dev/null || true
 # (php-redis is usually the last one to be rebuilt), so "newest" is tried first
 # and we step back one line until a complete set >= 8.4 is found. If the PPA is
 # unreachable and no complete PHP >= 8.4 exists we abort - LibreNMS will NOT run
-# on PHP 8.3.
-add-apt-repository -y ppa:ondrej/php 2>&1 | tail -1 || \
-  warn "ppa:ondrej/php could not be added - only distro PHP lines will be seen"
-apt-get update -y 2>/dev/null || true
-PHP_MODULES="fpm cli mysql curl gd xml mbstring sqlite3 redis bcmath gmp intl zip"
+# on PHP 8.3. Debian uses packages.sury.org; Ubuntu uses the Ondrej PHP PPA.
+if [ "$ID" = ubuntu ]; then
+  add-apt-repository -y ppa:ondrej/php || die "could not add ppa:ondrej/php"
+else
+  apt-get install -y apt-transport-https
+  curl -fsSLo /tmp/debsuryorg-archive-keyring.deb https://packages.sury.org/debsuryorg-archive-keyring.deb
+  dpkg -i /tmp/debsuryorg-archive-keyring.deb
+  printf 'deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ %s main\n' "$VERSION_CODENAME" > /etc/apt/sources.list.d/php.list
+fi
+apt-get update -y
+PHP_MODULES="fpm cli mysql curl gd gmp xml mbstring sqlite3 redis bcmath intl zip snmp"
 PHP_VER=""
-for cand in $(apt-cache search '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null | sed 's/-fpm.*//' | sort -Vr); do
+while IFS= read -r cand; do
   ver="${cand#php}"
   # skip lines below the LibreNMS minimum (8.4)
   if echo "$ver" | awk -F. '{exit ($1 > 8 || ($1 == 8 && $2 >= 4)) ? 1 : 0}'; then
@@ -246,9 +295,9 @@ for cand in $(apt-cache search '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null | sed 's/-f
     break
   fi
   warn "PHP ${ver}: modules not built yet:$missing - stepping back one line"
-done
+done < <(apt-cache search '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null | sed 's/-fpm.*//' | sort -Vr)
 if [ -z "$PHP_VER" ]; then
-  die "no complete PHP >= 8.4 found - LibreNMS requires PHP 8.4+ (recommended 8.5). Add ppa:ondrej/php or use a newer distro"
+  die "no complete PHP >= 8.4 found - LibreNMS requires PHP 8.4+ (recommended 8.5); verify the configured PHP repository"
 fi
 if [ "$PHP_VER" = "8.4" ]; then
   warn "only PHP 8.4 is available - LibreNMS recommends 8.5"
@@ -258,9 +307,11 @@ SYSTEM_DEFAULT_PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"
 PHP_PKGS=""
 for mod in $PHP_MODULES; do PHP_PKGS="$PHP_PKGS php${PHP_VER}-${mod}"; done
 log "Using PHP: ${PHP_VER} (${PHP_FPM_BIN})"
-apt-get install -y $PHP_PKGS 2>&1 | tail -3 || \
-  die "installing PHP ${PHP_VER} failed (check ppa:ondrej/php)"
-command -v "$PHP_FPM_BIN" || apt-get install -y "$PHP_FPM_BIN"
+apt-get install -y $PHP_PKGS
+command -v "$PHP_FPM_BIN" >/dev/null || die "${PHP_FPM_BIN} was not installed"
+for ext in curl gd gmp intl mbstring mysqli pdo_mysql pdo_sqlite redis snmp sqlite3 xml zip; do
+  php -m | tr '[:upper:]' '[:lower:]' | grep -qx "$ext" || die "PHP ${PHP_VER} extension missing after package install: ${ext}"
+done
 # The META packages pulled in by other deps (e.g. apt 'composer' -> php-cli)
 # register the plain "php" alternative to the newest *meta* line, which may be
 # a newer line WITHOUT our drivers (pdo_mysql/pdo_sqlite/redis), so unversioned
@@ -268,15 +319,21 @@ command -v "$PHP_FPM_BIN" || apt-get install -y "$PHP_FPM_BIN"
 # Pin the alternatives to OUR version so every "php" invocation uses the full
 # module set we installed above.
 if [ -x "/usr/bin/php${PHP_VER}" ] && command -v update-alternatives >/dev/null 2>&1; then
-  update-alternatives --set php "/usr/bin/php${PHP_VER}" 2>/dev/null || true
-  update-alternatives --set phar "/usr/bin/phar${PHP_VER}" 2>/dev/null || true
+  update-alternatives --set php "/usr/bin/php${PHP_VER}"
+  update-alternatives --set phar "/usr/bin/phar${PHP_VER}"
   log "forced /usr/bin/php -> php${PHP_VER}"
 fi
+php -r 'exit((PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION) === $argv[1] ? 0 : 1);' "$PHP_VER" || die "CLI PHP version does not match installed FPM PHP ${PHP_VER}"
 
 # =============================================================================
 log "== Phase 1: MariaDB - databases and accounts ============================"
-systemctl enable --now mariadb redis-server >/dev/null 2>&1 || true
-sleep 2
+CURRENT_PHASE="phase 1: MariaDB"
+systemctl enable --now mariadb redis-server
+for attempt in $(seq 1 30); do
+  mysqladmin ping --silent >/dev/null 2>&1 && break
+  [ "$attempt" -lt 30 ] || die "MariaDB did not become ready (see journalctl -u mariadb)"
+  sleep 2
+done
 
 # --- LibreNMS main db + user ---
 mysql -e "CREATE DATABASE IF NOT EXISTS \`${LX_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
@@ -286,24 +343,16 @@ mysql -e "GRANT ALL PRIVILEGES ON \`${LX_DB_NAME}\`.* TO '${LX_DB_USER}'@'localh
 mysql -e "FLUSH PRIVILEGES;"
 
 # --- read-only account for oxidized-web (devices + locations) ---
-mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${APP_DB_PASS}';"
-mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'localhost' IDENTIFIED BY '${APP_DB_PASS}';"
-mysql -e "CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'%' IDENTIFIED BY '${APP_DB_PASS}';"
-# ALTER keeps the runtime password in sync with the secrets file on reruns
-mysql -e "ALTER USER '${APP_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${APP_DB_PASS}';"
-mysql -e "ALTER USER '${APP_DB_USER}'@'localhost' IDENTIFIED BY '${APP_DB_PASS}';"
-mysql -e "ALTER USER '${APP_DB_USER}'@'%' IDENTIFIED BY '${APP_DB_PASS}';"
-# GRANT on db.* does not require tables to exist (unlike db.table, which trips
-# on "ERROR 1146 Table doesn't exist" before LibreNMS migrate has run in Phase 2)
-mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.* TO '${APP_DB_USER}'@'127.0.0.1';"
-mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.* TO '${APP_DB_USER}'@'localhost';"
-mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.* TO '${APP_DB_USER}'@'%';"
-mysql -e "FLUSH PRIVILEGES;"
+# Drop legacy broader accounts created by older installer versions.
+mysql -e "DROP USER IF EXISTS '${APP_DB_USER}'@'localhost', '${APP_DB_USER}'@'%';"
+mysql -e "DROP USER IF EXISTS '${APP_DB_USER}'@'127.0.0.1';"
+mysql -e "CREATE USER '${APP_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${APP_DB_PASS}';"
 
 # =============================================================================
 log "== Phase 2: LibreNMS (git install into /opt/librenms) ==================="
+CURRENT_PHASE="phase 2: LibreNMS"
+id librenms >/dev/null 2>&1 || useradd -r -M -d /opt/librenms -s /bin/bash librenms
 if [ ! -d /opt/librenms/.git ]; then
-  id librenms >/dev/null 2>&1 || useradd -r -M -d /opt/librenms -s /bin/bash librenms
   git clone https://github.com/librenms/librenms.git /opt/librenms 2>/dev/null || \
     die "git clone of librenms failed"
   # .env with generated credentials (write BEFORE composer so artisan can work)
@@ -329,79 +378,73 @@ QUEUE_CONNECTION=redis
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
 EOF
-  chown -R librenms:librenms /opt/librenms
-  # composer MUST run as the librenms user (running as root disables plugins and
-  # breaks the post-autoload-dump hook -> composer exits non-zero)
-  su -s /bin/bash librenms -c "cd /opt/librenms && php /usr/bin/composer install --no-dev --no-interaction --no-progress" \
-      2>&1 | tail -3 || warn "composer install failed (rerun manually: su -s /bin/bash librenms -c 'composer install')"
-  # load schema (roles admin/global-read/user come from db:seed -> RolesSeeder)
-  su -s /bin/bash librenms -c "cd /opt/librenms && php artisan migrate --force" 2>&1 | tail -2 || \
-    warn "migrate failed (maybe composer is broken; fix composer first)"
-  su -s /bin/bash librenms -c "cd /opt/librenms && php artisan db:seed --force" 2>&1 | tail -2 || \
-    warn "db:seed failed (roles may be missing; add the admin in the web UI)"
-  # modern LibreNMS keeps runtime config in the DB ("config" table); the web
-  # installer creates it but a git install does not. Without it every config
-  # lookup throws "Table 'librenms.config' doesn't exist" and discovery/polling
-  # mark devices as down. Schema matches resources/definitions/schema/db_schema.yaml.
-  mysql "${LX_DB_NAME}" -e "CREATE TABLE IF NOT EXISTS config (
-    config_id int unsigned NOT NULL AUTO_INCREMENT,
-    config_name varchar(255) NOT NULL,
-    config_value mediumtext NOT NULL,
-    PRIMARY KEY (config_id),
-    UNIQUE KEY config_config_name_unique (config_name)
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;" 2>/dev/null || \
-    warn "could not ensure the 'config' table exists (check mysql grants)"
-  # table-level SELECT grants for the app (safe now: migrate created the tables)
-  mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`devices\`   TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
-  mysql -e "GRANT SELECT ON \`${LX_DB_NAME}\`.\`locations\` TO '${APP_DB_USER}'@'127.0.0.1','${APP_DB_USER}'@'localhost','${APP_DB_USER}'@'%';" 2>/dev/null || true
-  mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
-  # first LibreNMS admin (official CLI: user:add --role=admin).
-  # NOTE: older LibreNMS used scripts/adduser.php and a users.level column; both
-  # are gone in the current role-based (Spatie) user model, which is why the
-  # raw-SQL insert previously died with "Unknown column 'level'".
-  ADM_EXISTS="$(mysql -N -e "SELECT COUNT(*) FROM \`${LX_DB_NAME}\`.users WHERE username='${LX_ADMIN_USER}';" 2>/dev/null || echo 0)"
-  if [ "${ADM_EXISTS}" = "0" ]; then
-    # LibreNMS requires a >=8 char password: a short one (typed interactively,
-    # or saved by an older run and reloaded from the secrets file on rerun)
-    # makes user:add fail. Auto-heal: swap in a strong one and retry, then
-    # persist it so the next rerun keeps using a working password.
-    ADDED=0
-    for try in 1 2 3; do
-      RES="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan user:add '${LX_ADMIN_USER}' --password='${LX_ADMIN_PASS}' --role=admin --email='${LX_ADMIN_EMAIL}' --full-name='${LX_ADMIN_USER}'" 2>&1)" || true
-      echo "$RES" | tail -2
-      ADM_EXISTS="$(mysql -N -e "SELECT COUNT(*) FROM \`${LX_DB_NAME}\`.users WHERE username='${LX_ADMIN_USER}';" 2>/dev/null || echo 0)"
-      [ "${ADM_EXISTS}" != "0" ] && { ADDED=1; break; }
-      if [ "$try" -lt 3 ]; then
-        LX_ADMIN_PASS="$(openssl rand -hex 12)"
-        warn "user:add failed for '${LX_ADMIN_USER}' - retrying with a generated 24-char password"
-      fi
-    done
-    [ "$ADDED" = "1" ] || warn "user:add failed 3x (create '${LX_ADMIN_USER}' in the LibreNMS web UI)"
-    sed -i "s|^LX_ADMIN_PASS=.*|LX_ADMIN_PASS=${LX_ADMIN_PASS}|" /root/oxidized-web-deploy.secrets 2>/dev/null || true
-  else
-    log "LibreNMS admin '${LX_ADMIN_USER}' already exists - skipping creation"
-  fi
-  # polling + discovery cron
-  cat > /etc/cron.d/librenms <<'CRON'
+else
+  log "LibreNMS repository already present - reapplying dependencies, migrations and configuration"
+fi
+if [ ! -s /opt/librenms/.env ]; then
+  die "LibreNMS .env is missing or empty"
+fi
+# Keep installer-managed connection values synchronized on reruns without
+# rotating APP_KEY or discarding unrelated user settings. Inputs are validated
+# above and cannot contain the sed delimiter.
+sed -i \
+  -e "s|^APP_URL=.*|APP_URL=${LX_APP_URL}|" \
+  -e "s|^DB_USERNAME=.*|DB_USERNAME=${LX_DB_USER}|" \
+  -e "s|^DB_PASSWORD=.*|DB_PASSWORD=${LX_DB_PASS}|" \
+  -e "s|^DB_DATABASE=.*|DB_DATABASE=${LX_DB_NAME}|" /opt/librenms/.env
+chmod 600 /opt/librenms/.env
+chown -R librenms:librenms /opt/librenms
+# composer MUST run as librenms; its failure is fatal because artisan/migrations
+# and the web UI cannot be trusted without the matching vendor dependencies.
+su -s /bin/bash librenms -c "cd /opt/librenms && php /usr/bin/composer install --no-dev --no-interaction --no-progress" \
+    2>&1 | tail -5 || die "composer install failed; see preceding output"
+# Re-apply schema and seed data on every run. These operations are idempotent.
+su -s /bin/bash librenms -c "cd /opt/librenms && php artisan migrate --force" 2>&1 | tail -5 || die "LibreNMS migrations failed"
+su -s /bin/bash librenms -c "cd /opt/librenms && php artisan db:seed --force" 2>&1 | tail -5 || die "LibreNMS seeding failed"
+# LibreNMS 26 creates this table through its schema; fail instead of masking a
+# missing/broken schema since core config lookups depend on it.
+mysql "${LX_DB_NAME}" -e "CREATE TABLE IF NOT EXISTS config (
+  config_id int unsigned NOT NULL AUTO_INCREMENT,
+  config_name varchar(255) NOT NULL,
+  config_value mediumtext NOT NULL,
+  PRIMARY KEY (config_id),
+  UNIQUE KEY config_config_name_unique (config_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+# Grant only the two inventory tables required by the app and only to its loopback
+# account. Never expose this read-only account to arbitrary remote hosts.
+mysql -e "GRANT SELECT (ip, hostname, sysName, location_id) ON \`${LX_DB_NAME}\`.\`devices\` TO '${APP_DB_USER}'@'127.0.0.1';"
+mysql -e "GRANT SELECT (id, location) ON \`${LX_DB_NAME}\`.\`locations\` TO '${APP_DB_USER}'@'127.0.0.1';"
+mysql -e "FLUSH PRIVILEGES;"
+# Create the initial LibreNMS admin only when absent. Password remains in the
+# root-only secrets file; do not print DB or web-admin credentials to stdout.
+ADM_EXISTS="$(mysql -N -e "SELECT COUNT(*) FROM \`${LX_DB_NAME}\`.users WHERE username='${LX_ADMIN_USER}';")"
+if [ "${ADM_EXISTS}" = "0" ]; then
+  RES="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan user:add '${LX_ADMIN_USER}' --password='${LX_ADMIN_PASS}' --role=admin --email='${LX_ADMIN_EMAIL}' --full-name='${LX_ADMIN_USER}'" 2>&1)" || die "LibreNMS user:add failed (details in protected installer log)"
+  echo "$RES" | tail -2
+else
+  log "LibreNMS admin '${LX_ADMIN_USER}' already exists - skipping creation"
+fi
+# polling + discovery cron
+cat > /etc/cron.d/librenms <<'CRON'
 */5 * * * *   librenms  /opt/librenms/poller-wrapper.py 16 >> /dev/null 2>&1
 */5 * * * *   librenms  /opt/librenms/discovery-wrapper.py 1 >> /dev/null 2>&1
 15    */6 * * * librenms  /opt/librenms/billing-cron.php >> /dev/null 2>&1
 */5 * * * *   librenms  /opt/librenms/alerts-cron.php >> /dev/null 2>&1
 33   0 * * *   librenms  /opt/librenms/daily.sh >> /dev/null 2>&1
 CRON
-  chmod 644 /etc/cron.d/librenms
-else
-  log "LibreNMS already present - skipping git setup"
-fi
+chmod 644 /etc/cron.d/librenms
 
 # ---- python deps for the poller/discovery wrappers ------------------------
 # poller-wrapper.py / discovery-wrapper.py import command_runner, psutil,
 # redis, PyMySQL, python-dotenv. Without them every cron poll crashes silently
 # and NO device is ever polled -> no RRD data -> empty graphs.
-# Ubuntu 24.04 ships an externally-managed pip, hence --break-system-packages.
+# Recent pip versions enforce PEP 668; older supported distro pip versions do
+# not know --break-system-packages, so add it only when the installed pip offers it.
 if [ -f /opt/librenms/requirements.txt ]; then
-  python3 -m pip install --break-system-packages -r /opt/librenms/requirements.txt 2>&1 | tail -1 || \
-    warn "python deps not installed - LibreNMS will not poll (graphs stay empty)"
+  PIP_SYSTEM_FLAG=()
+  python3 -m pip install --help 2>/dev/null | grep -q -- '--break-system-packages' && PIP_SYSTEM_FLAG=(--break-system-packages) || true
+  python3 -m pip install "${PIP_SYSTEM_FLAG[@]}" -r /opt/librenms/requirements.txt 2>&1 | tail -5 || \
+    die "LibreNMS Python dependencies failed to install; polling would not work"
 fi
 
 # ---- modern extras: maintenance scheduler + admin convenience --------------
@@ -412,10 +455,13 @@ fi
 # maintenance + operational-check tasks).
 if [ -f /opt/librenms/dist/librenms-scheduler.service ] && [ -f /opt/librenms/dist/librenms-scheduler.timer ]; then
   cp /opt/librenms/dist/librenms-scheduler.service /opt/librenms/dist/librenms-scheduler.timer /etc/systemd/system/
-  systemctl daemon-reload
-  systemctl enable --now librenms-scheduler.timer >/dev/null 2>&1 || true
+systemctl daemon-reload
+  systemctl enable --now librenms-scheduler.timer
+else
+  die "LibreNMS scheduler service/timer missing from checkout"
 fi
 ln -sf /opt/librenms/lnms /usr/local/bin/lnms
+systemctl enable --now cron
 mkdir -p /etc/bash_completion.d
 cp /opt/librenms/misc/lnms-completion.bash /etc/bash_completion.d/ 2>/dev/null || true
 cp /opt/librenms/misc/librenms.logrotate /etc/logrotate.d/librenms 2>/dev/null || true
@@ -432,66 +478,63 @@ grep -q '^APP_KEY=' /opt/librenms/.env 2>/dev/null || \
 # Idempotent: copies are overwritten on every run, so upstream upgrades cannot
 # silently "forget" the custom defs.
 if [ -f "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_detection/asustor.yaml" ]; then
-  cp -r "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_detection/" /opt/librenms/resources/definitions/
-  cp -r "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_discovery/" /opt/librenms/resources/definitions/
+  install -D -o librenms -g librenms -m 0644 "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_detection/asustor.yaml" /opt/librenms/resources/definitions/os_detection/asustor.yaml
+  install -D -o librenms -g librenms -m 0644 "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_discovery/asustor.yaml" /opt/librenms/resources/definitions/os_discovery/asustor.yaml
   mkdir -p /opt/librenms/mibs
-  cp -r "${ROOTDIR}/deploy/asustor-defs/mibs/asustor" /opt/librenms/mibs/
-  [ -f "${ROOTDIR}/deploy/asustor-defs/html/images/os/asustor.svg" ] && \
-    cp "${ROOTDIR}/deploy/asustor-defs/html/images/os/asustor.svg" /opt/librenms/html/images/os/ 2>/dev/null || true
-  chown -R librenms:librenms \
-      /opt/librenms/resources/definitions/os_detection/asustor.yaml \
-      /opt/librenms/resources/definitions/os_discovery/asustor.yaml \
-      /opt/librenms/mibs/asustor \
-      /opt/librenms/html/images/os/asustor.svg 2>/dev/null || true
+  install -d -o librenms -g librenms -m 0755 /opt/librenms/mibs/asustor
+  install -o librenms -g librenms -m 0644 "${ROOTDIR}/deploy/asustor-defs/mibs/asustor/"* /opt/librenms/mibs/asustor/
+  install -D -o librenms -g librenms -m 0644 "${ROOTDIR}/deploy/asustor-defs/html/images/os/asustor.svg" /opt/librenms/html/images/os/asustor.svg
   log "installed ASUSTOR OS definitions (os=asustor detection)"
 fi
 
 # --- enable Oxidized integration inside LibreNMS config.php ------------------
 LX_CFG=/opt/librenms/config.php
-# A fresh git clone (or empty/tag-less file) makes the stanzas below inert:
-# without the "<?php" open tag config.php is echoed as HTML, never executed,
-# so Oxidized never shows up in the LibreNMS UI. Write a complete valid file
-# when missing/empty/without open tag; otherwise append only what's absent.
-if [ ! -s "$LX_CFG" ] || ! grep -q '^<?php' "$LX_CFG" 2>/dev/null; then
-  {
-    echo '<?php'
-    echo ''
-    echo "\$config['oxidized']['enabled']   = true;"
-    echo "\$config['oxidized']['url']       = 'http://127.0.0.1:${OX_PORT}';"
-    echo "\$config['oxidized']['default_group'] = '${LX_DEFAULT_GROUP}';"
-    echo "\$config['oxidized']['features']['versioning'] = true;"
-    echo "\$config['oxidized']['reload_nodes'] = true;"
-    echo "\$config['oxidized']['groups'] = false;"
-    echo ''
-    echo "\$config['api']['enabled'] = true;"
-  } > "$LX_CFG"
-  chown librenms:librenms "$LX_CFG"
-  chmod 644 "$LX_CFG"
-else
-  grep -q "'oxidized'" "$LX_CFG" 2>/dev/null || cat >> "$LX_CFG" <<EOF
+# A fresh git clone has no config.php. Keep the installer-owned Oxidized settings
+# in a separate PHP file: never overwrite a user's config.php or append settings
+# that may conflict with existing values.
+if [ ! -e "$LX_CFG" ]; then
+  printf '<?php\n' > "$LX_CFG"
+elif [ ! -s "$LX_CFG" ] || ! grep -q '^<?php' "$LX_CFG" 2>/dev/null; then
+  die "$LX_CFG exists but is empty or not a PHP config; refusing to overwrite it"
+fi
+grep -q '?>' "$LX_CFG" && die "$LX_CFG contains a closing PHP tag; remove it before appending installer settings"
+LX_CFG_TMP="$(mktemp)"
+read -r LX_BLOCK_BEGIN LX_BLOCK_END < <(awk '{ line=$0; sub(/\r$/, "", line); if (line == "// BEGIN OXIDIZED-WEB INSTALLER BLOCK") b++; if (line == "// END OXIDIZED-WEB INSTALLER BLOCK") e++ } END { print b+0, e+0 }' "$LX_CFG")
+[ "$LX_BLOCK_BEGIN" = "$LX_BLOCK_END" ] || die "Unbalanced OxidizedWeb markers in LibreNMS config.php; refusing to rewrite it"
+awk '
+  { line=$0; sub(/\r$/, "", line) }
+  line == "// BEGIN OXIDIZED-WEB INSTALLER BLOCK" { skip=1; next }
+  line == "// END OXIDIZED-WEB INSTALLER BLOCK" { skip=0; next }
+  !skip { print $0 }
+' "$LX_CFG" > "$LX_CFG_TMP"
+cat >> "$LX_CFG_TMP" <<EOF
 
-// --- oxidized integration (added by deploy/install.sh) ---
-\$config['oxidized']['enabled']   = true;
-\$config['oxidized']['url']       = 'http://127.0.0.1:${OX_PORT}';
+// BEGIN OXIDIZED-WEB INSTALLER BLOCK
+\$config['oxidized']['enabled'] = true;
+\$config['oxidized']['url'] = 'http://127.0.0.1:${OX_PORT}';
 \$config['oxidized']['default_group'] = '${LX_DEFAULT_GROUP}';
 \$config['oxidized']['features']['versioning'] = true;
 \$config['oxidized']['reload_nodes'] = true;
 \$config['oxidized']['groups'] = false;
+\$config['api']['enabled'] = true;
+// END OXIDIZED-WEB INSTALLER BLOCK
 EOF
-  grep -q "api\['enabled'\]" "$LX_CFG" 2>/dev/null || \
-    printf "\n\$config['api']['enabled'] = true;\n" >> "$LX_CFG"
-fi
+chown librenms:librenms "$LX_CFG_TMP"
+chmod 640 "$LX_CFG_TMP"
+php -l "$LX_CFG_TMP" >/dev/null || die "Generated LibreNMS config.php is invalid PHP"
+mv -f "$LX_CFG_TMP" "$LX_CFG"
 # ConfigRepository caches the merged settings (Laravel file cache). Without a
 # clear, a previously broken/empty config.php stays cached and Oxidized stays
 # hidden in the UI even after the file is fixed.
-su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/null 2>&1 || true
+su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/null 2>&1 || die "LibreNMS config cache clear failed"
 
 # LibreNMS nginx + fpm
 log "== Phase 3: nginx + php-fpm (LibreNMS) ================================="
+CURRENT_PHASE="phase 3: LibreNMS web server"
 # rrd_dir (validate.php wants /opt/librenms/rrd on 0775; storage/rrd is the
 # newer default the graph code also uses) - both writable by the librenms user.
 mkdir -p /opt/librenms/rrd /opt/librenms/storage/rrd /opt/librenms/bootstrap/cache
-chown -R librenms:librenms /opt/librenms 2>/dev/null || true
+chown -R librenms:librenms /opt/librenms
 chmod 775 /opt/librenms/rrd
 
 cat > /etc/php/${PHP_VER}/fpm/pool.d/librenms.conf <<'LIBPOOL'
@@ -512,12 +555,13 @@ security.limit_extensions = .php
 php_admin_value[open_basedir] = /opt/librenms/:/tmp/
 LIBPOOL
 
-sed -e 's/^    listen      80;/    listen      '"${LX_SITE_FQDN}:${LX_SITE_PORT}"';/' \
+sed -e 's/^    listen      80;/    listen      '"${LX_LISTEN_ADDR}:${LX_SITE_PORT}"';/' \
     -e 's/server_name.*;/server_name '"${LX_SITE_FQDN}"';/' \
     "${ROOTDIR}/deploy/templates/nginx-librenms.conf" > /etc/nginx/conf.d/librenms.conf
 
 # =============================================================================
 log "== Phase 4: Oxidized (Ruby daemon + REST :8888) ========================"
+CURRENT_PHASE="phase 4: Oxidized"
 if ! command -v oxidized >/dev/null 2>&1; then
   if ! gem install oxidized --no-document 2>&1 | tail -5; then
     echo -e "\n[error] rugged (libgit2) native build failed. Last lines of gem_make.out:"
@@ -529,8 +573,7 @@ fi
 # gem. Without it oxidized aborts with "oxidized-web not found" on startup.
 # libicu-dev (Phase 0) is required to build its charlock_holmes dependency.
 if ! gem list oxidized-web -i 2>/dev/null | grep -q true; then
-  gem install oxidized-web --no-document 2>&1 | tail -4 || \
-    warn "oxidized-web gem failed to install - REST API on :${OX_PORT} will not work"
+  gem install oxidized-web --no-document 2>&1 | tail -5 || die "oxidized-web gem failed to install"
 fi
 
 mkdir -p /etc/oxidized /home/oxidized/configs /home/oxidized/.config/oxidized
@@ -541,17 +584,16 @@ chown -R oxidized:oxidized /home/oxidized
 # LibreNMS /api/v0/oxidized requires a valid API token, so one is created for
 # the LibreNMS admin below and injected into the source http headers.
 # (Reuse an existing token on reruns so reruns don't pile up DB tokens.)
-OX_TOKEN="$(sed -n "s/.*X-Auth-Token: '\([^']*\)'.*/\1/p" /etc/oxidized/config 2>/dev/null | head -1)" || true
+OX_TOKEN="$(sed -n "s/.*X-Auth-Token: '\([^']*\)'.*/\1/p" /etc/oxidized/config 2>/dev/null | sed -n '1p')" || true
+if [ -n "$OX_TOKEN" ]; then
+  TOKEN_HTTP="$(curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w '%{http_code}' -H "X-Auth-Token: ${OX_TOKEN}" "http://${LX_SITE_FQDN}:${LX_SITE_PORT}/api/v0/oxidized" 2>/dev/null || true)"
+  [ "$TOKEN_HTTP" = 200 ] || OX_TOKEN=""
+fi
 if [ -z "$OX_TOKEN" ]; then
-  # pipefail-safe: a non-zero artisan exit must never abort the whole install
-  # (a silent pipeline failure under set -euo pipefail kills the run mid-phase).
-  # The error text is kept visible so a failure is diagnosable in the log.
-  OX_TOKEN="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan api:token-create '${LX_ADMIN_USER}' --name=oxidized" 2>&1 | awk '/^[0-9]+\|/{print; exit}')" || true
-  if [ -n "$OX_TOKEN" ]; then
-    echo ">> Oxidized API token created"
-  else
-    warn "could not create a LibreNMS API token for Oxidized"
-  fi
+  TOKEN_OUTPUT="$(su -s /bin/bash librenms -c "cd /opt/librenms && php artisan api:token-create '${LX_ADMIN_USER}' --name=oxidized" 2>&1)" || die "LibreNMS API token creation failed"
+  OX_TOKEN="$(awk '/^[0-9]+\|/{print; exit}' <<< "$TOKEN_OUTPUT")"
+  [ -n "$OX_TOKEN" ] || die "LibreNMS API token output did not contain a token"
+  echo ">> Oxidized API token created"
 fi
 # yaml: 'vars:' with no children is invalid, so a bare 'vars: {}' is emitted
 # unless an ENABLE secret was provided (single password devices have none).
@@ -616,7 +658,7 @@ EOF
 if [ -n "$OX_TOKEN" ]; then
   sed -i "s/^GROUPS: {}/    headers:\n      X-Auth-Token: '${OX_TOKEN}'\nGROUPS: {}/" /etc/oxidized/config
 else
-  warn "No LibreNMS API token could be created - Oxidized cannot fetch devices (add X-Auth-Token to /etc/oxidized/config)"
+  die "No LibreNMS API token available for Oxidized"
 fi
 chown -R oxidized:oxidized /etc/oxidized
 
@@ -626,7 +668,7 @@ if [ -z "$OXIDIZED_BIN" ]; then
         [ -x "$c" ] && { OXIDIZED_BIN="$c"; break; }
     done
 fi
-[ -n "$OXIDIZED_BIN" ] || warn "oxidized binary not found - supply ExecStart in /etc/systemd/system/oxidized.service"
+[ -n "$OXIDIZED_BIN" ] || die "oxidized binary not found after gem installation"
 
 cat > /etc/systemd/system/oxidized.service <<UNIT
 [Unit]
@@ -637,7 +679,8 @@ Wants=network-online.target
 [Service]
 ExecStart=${OXIDIZED_BIN:-/usr/local/bin/oxidized}
 User=oxidized
-KillSignal=SIGKILL
+KillSignal=SIGTERM
+TimeoutStopSec=30
 Environment="OXIDIZED_HOME=/etc/oxidized"
 Restart=on-failure
 RestartSec=300s
@@ -646,10 +689,12 @@ RestartSec=300s
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now oxidized >/dev/null 2>&1 || warn "oxidized start delayed (needs LibreNMS running)"
+systemctl enable oxidized
+systemctl start oxidized >/dev/null 2>&1 || warn "oxidized is waiting for a usable LibreNMS node source"
 
 # =============================================================================
 log "== Phase 5: oxidized-web PHP app (:${OXWEB_PORT}) ======================"
+CURRENT_PHASE="phase 5: oxidized-web"
 [ -d /opt/oxidized-web ] || mkdir -p /opt/oxidized-web
 # Copy the app sources into a staging dir FIRST: when the repo checkout IS
 # /opt/oxidized-web (git clone into the app dir) the rm -rf below would
@@ -672,6 +717,8 @@ const OX_LX_DB   = '${LX_DB_NAME}';
 const OX_LX_USER = '${APP_DB_USER}';
 const OX_LX_PASS = '${APP_DB_PASS}';
 EOF
+chown root:www-data /opt/oxidized-web/config.php
+chmod 640 /opt/oxidized-web/config.php
 
 cat > /etc/php/${PHP_VER}/fpm/pool.d/oxidized.conf <<'OXPOOL'
 [oxidized]
@@ -694,20 +741,24 @@ php_admin_value[upload_max_filesize]     = 4M
 php_admin_value[post_max_size]           = 4M
 OXPOOL
 
-sed -e "s/listen .*8889;/listen ${OXWEB_FQDN}:${OXWEB_PORT};/" \
+sed -e "s/listen .*8889;/listen ${OXWEB_LISTEN_ADDR}:${OXWEB_PORT};/" \
     "${ROOTDIR}/deploy/templates/nginx-oxidized-web.conf" > /etc/nginx/conf.d/oxidized-web.conf
 
 # =============================================================================
 log "== Phase 6: start services + first admin ================================"
-systemctl restart "php${PHP_VER}-fpm" nginx >/dev/null 2>&1 || true
+CURRENT_PHASE="phase 6: service startup and admin"
+php-fpm${PHP_VER} -t >/dev/null || die "PHP-FPM configuration test failed"
+nginx -t >/dev/null 2>&1 || die "nginx configuration test failed"
+systemctl restart "php${PHP_VER}-fpm" nginx
 sleep 3
 # oxidized crashed early (LibreNMS wasn't up yet); restart it so it picks up
 # the freshly injected API token and the now-live LibreNMS API
-systemctl restart oxidized >/dev/null 2>&1 || true
+systemctl restart oxidized >/dev/null 2>&1 || warn "oxidized is not yet running; it may need a usable device in LibreNMS"
 sleep 2
 
-# bootstrap first admin in oxidized-web (idempotent: only if users table empty)
-if ! php -r '$d=new PDO("sqlite:/opt/oxidized-web/data/oxidized.db"); $n=(int)$d->query("SELECT COUNT(*) FROM users")->fetchColumn(); exit($n>0?0:1);' 2>/dev/null; then
+# Bootstrap the configured admin only if that username is absent; preserve any
+# other users and credentials on reruns.
+if ! php -r '$d=new PDO("sqlite:/opt/oxidized-web/data/oxidized.db"); $s=$d->prepare("SELECT COUNT(*) FROM users WHERE username=?"); $s->execute([$argv[1]]); exit((int)$s->fetchColumn()>0?0:1);' "${OX_WEB_ADMIN_USER}" 2>/dev/null; then
   php -r '
     $dir="/opt/oxidized-web/data";
     if(!is_dir($dir)){mkdir($dir,0770,true);}
@@ -716,26 +767,39 @@ if ! php -r '$d=new PDO("sqlite:/opt/oxidized-web/data/oxidized.db"); $n=(int)$d
     $u="$argv[2]"; $p=password_hash($argv[1], PASSWORD_DEFAULT);
     $s=$d->prepare("INSERT INTO users (username, password_hash, role) VALUES (?,?, '\''admin'\'')");
     $s->execute([$u,$p]); echo "created admin login=".$u."\n";
-  ' "${OX_WEB_ADMIN_PASS}" "${OX_WEB_ADMIN_USER}" 2>&1 | grep -E "created admin|Fatal|Exception"
+  ' "${OX_WEB_ADMIN_PASS}" "${OX_WEB_ADMIN_USER}" 2>&1 || die "failed to bootstrap oxidized-web admin"
 fi
 chown -R www-data:www-data /opt/oxidized-web
+chown root:www-data /opt/oxidized-web/config.php
+chmod 640 /opt/oxidized-web/config.php
 
 # =============================================================================
 log "== Verify ==============================================================="
-# note: systemctl is-active returns non-zero when a unit is not active, so
-# every call needs "|| true" - otherwise set -e would abort the verify block
-echo -n "nginx:       "; systemctl is-active nginx || true
-echo -n "php-fpm:     "; systemctl is-active "php${PHP_VER}-fpm" || true
-echo -n "mariadb:     "; systemctl is-active mariadb || true
-echo -n "redis:       "; systemctl is-active redis-server || true
+CURRENT_PHASE="verification"
+for svc in nginx "php${PHP_VER}-fpm" mariadb redis-server cron librenms-scheduler.timer; do
+  state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+  echo "${svc}: ${state:-inactive}"
+  [ "$state" = active ] || die "required service ${svc} is not active"
+done
 echo -n "oxidized:    "; systemctl is-active oxidized || true
 # oxidized intentionally stays down while LibreNMS has no devices (stock
 # behavior: "source returns no usable nodes"); it retries every 300s
 systemctl is-active oxidized >/dev/null 2>&1 || \
   warn "oxidized не активен: штатно, пока в LibreNMS нет устройств (см. шаг 2 в итогах)"
-echo -n "librenms db: "; mysql -e "SELECT 1 FROM \`${LX_DB_NAME}\`.devices LIMIT 1" >/dev/null 2>&1 && echo OK || echo "(empty - fine)"
-curl -s -o /dev/null -w "LibreNMS  :${LX_SITE_PORT}      -> HTTP %{http_code}\n"  "http://${LX_SITE_FQDN}:${LX_SITE_PORT}/" || true
-curl -s -o /dev/null -w "oxidized-web :${OXWEB_PORT} -> HTTP %{http_code}\n" "http://${OXWEB_FQDN}:${OXWEB_PORT}/" || true
+php-fpm${PHP_VER} -t >/dev/null || die "PHP-FPM configuration test failed"
+nginx -t >/dev/null 2>&1 || die "nginx configuration test failed"
+php -r 'foreach (["curl","pdo_mysql","pdo_sqlite","sqlite3"] as $e) { if (!extension_loaded($e)) { fwrite(STDERR,"missing PHP extension: $e\n"); exit(1); } }' || die "required PHP extension is missing"
+mysql -N -e "SELECT ip,hostname FROM \`${LX_DB_NAME}\`.devices LIMIT 0" >/dev/null || die "LibreNMS devices table is unavailable"
+mysql -N -e "SELECT id,location FROM \`${LX_DB_NAME}\`.locations LIMIT 0" >/dev/null || die "LibreNMS locations table is unavailable"
+su -s /bin/bash www-data -c "php -r 'require \"/opt/oxidized-web/config.php\"; \$p=new PDO(\"mysql:host=\".OX_LX_HOST.\";dbname=\".OX_LX_DB.\";charset=utf8mb4\",OX_LX_USER,OX_LX_PASS); \$p->query(\"SELECT ip,hostname,sysName FROM devices LIMIT 0\"); \$p->query(\"SELECT d.location_id,l.id,l.location FROM devices d LEFT JOIN locations l ON l.id=d.location_id LIMIT 0\");'" \
+  || die "oxidized-web DB account cannot read required inventory fields"
+TOKEN_HTTP="$(curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w '%{http_code}' -H "X-Auth-Token: ${OX_TOKEN}" "http://${LX_SITE_FQDN}:${LX_SITE_PORT}/api/v0/oxidized" 2>/dev/null || true)"
+[ "$TOKEN_HTTP" = 200 ] || die "Oxidized LibreNMS API token check failed (HTTP ${TOKEN_HTTP:-connection-error})"
+for pair in "${LX_SITE_FQDN}:${LX_SITE_PORT}" "${OXWEB_FQDN}:${OXWEB_PORT}"; do
+  status="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://${pair}/" || true)"
+  [[ "$status" =~ ^(200|301|302|303|307|308)$ ]] || die "HTTP health check failed for ${pair} (status ${status:-connection-error})"
+  echo "HTTP ${pair} -> ${status}"
+done
 
 log "== DONE ================================================================"
 cat <<SUMMARY
@@ -744,10 +808,6 @@ Stack deployed:
   LibreNMS      http://${LX_SITE_FQDN}:${LX_SITE_PORT}/   admin ${LX_ADMIN_USER} / (см. секреты)
   Oxidized REST http://${OX_HOST}:${OX_PORT}
   oxidized-web  http://${OXWEB_FQDN}:${OXWEB_PORT}/       admin ${OX_WEB_ADMIN_USER} / (см. секреты)
-
-MySQL accounts:
-  ${LX_DB_USER} (all on ${LX_DB_NAME})  pass: ${LX_DB_PASS}
-  ${APP_DB_USER} (SELECT only)          pass: ${APP_DB_PASS}
 
 Секреты сохранены: /root/oxidized-web-deploy.secrets (chmod 600)
 

@@ -76,7 +76,7 @@ sudo bash deploy/install.sh
 | MySQL-логин для LibreNMS | `librenms` | CREATE USER + GRANT ALL, `.env` |
 | **Пароль MySQL LibreNMS** | случайный | GRANT, `.env` |
 | MySQL-аккаунт oxidized-web (read-only) | `oxidized_web` | CREATE USER + GRANT SELECT, `config.php` |
-| **Пароль oxidized-web (MySQL)** | случайный | GRANT, `config.php` |
+| **Пароль oxidized-web (MySQL)** | случайный | точечные GRANT на `devices`/`locations`, `config.php` |
 | **Пароль админа LibreNMS** | случайный | `php artisan user:add --role=admin` |
 | Логин админа LibreNMS | `admin` | `php artisan user:add` |
 | Email админа LibreNMS | `admin@localhost` | `php artisan user:add` |
@@ -86,7 +86,7 @@ sudo bash deploy/install.sh
 | Порт LibreNMS nginx | `80` | `listen`, APP_URL |
 | IP/домен oxidized-web | как у LibreNMS | `listen`, `server_name` |
 | Порт oxidized-web nginx | `8889` | `listen` |
-| Oxidized REST host (bind) | `127.0.0.1` | `/etc/oxidized/config` (`rest:`) |
+| Oxidized REST host (bind) | `127.0.0.1` | `/etc/oxidized/config` (только loopback: REST API без собственной авторизации) |
 | Oxidized REST порт | `8888` | `/etc/oxidized/config`, `config.php` LibreNMS |
 | Группа Oxidized по умолчанию | `default` | `config.php` LibreNMS |
 | FQDN для исходящих ссылок (base_url) | `http://<IP>` | `.env APP_URL` (порт подставляется автоматически) |
@@ -100,8 +100,8 @@ sudo bash deploy/install.sh
    `pdo_mysql`, `curl`, `sqlite3`, `mbstring` и др.), rrdtool, snmp, composer, ruby, git.
    PHP-версия определяется автоматически.
 2. **Phase 1 — MariaDB**: создаёт БД `librenms`, пользователя `librenms` (`ALL`) и
-   read-only `oxidized_web` (`SELECT` на `devices` и `locations`, для хостов
-   `127.0.0.1` / `localhost` / `%`).
+   read-only `oxidized_web` (только `SELECT` на нужные столбцы `devices` и `locations`,
+   только для `127.0.0.1`).
 3. **Phase 2 — LibreNMS**: `git clone` в `/opt/librenms`, `composer install`,
    `.env` с ответами мастера, `artisan migrate`, cron (poller/discovery/alerts),
    создание первого админа, включение интеграции Oxidized и REST API в `config.php`.
@@ -113,10 +113,10 @@ sudo bash deploy/install.sh
 6. **Phase 5 — oxidized-web**: копирует `public/` и `src/` в `/opt/oxidized-web`,
    генерирует реальный `config.php`, пул `oxidized` (сокет
    `/run/php-fpm-oxidized.sock`), nginx-хост на порту 8889.
-7. **Phase 6 — старт + админы**: рестарт php-fpm/nginx, бутстрап первого админа
-   oxidized-web (только если таблица пуста, повторные запуски не дублируют).
-8. **Verify**: статусы служб (`nginx`, `php-fpm`, `mariadb`, `redis`, `oxidized`),
-   HTTP-коды обоих сайтов, итоговое резюме с адресами.
+7. **Phase 6 — старт + админы**: проверка конфигурации и рестарт php-fpm/nginx,
+   создание заданного admin oxidized-web только если такого логина ещё нет.
+8. **Verify**: обязательные службы, конфиги nginx/php-fpm, PHP-модули, MySQL-схема
+   и права приложения, LibreNMS API-токен, HTTP-ответы обоих сайтов.
 
 ### Шаг 5. После установки (чек-лист)
 
@@ -203,6 +203,7 @@ php -l src/oxidized.php && php -l public/index.php
 ## Требования и ограничения
 
 - Целевой хост: Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 (amd64), `apt-get`, root.
+- Требуется доступ к Ubuntu PPA `ondrej/php` на Ubuntu или репозиторию `packages.sury.org/php` на Debian; скрипт выбирает самую новую полную PHP-ветку от 8.5, допускает 8.4 как минимум LibreNMS.
 - PHP 8.4+ с расширениями `pdo_mysql`, `curl`, `mbstring`, `sqlite3` (минимальная версия по официальным требованиям LibreNMS; рекомендуется 8.5).
 - Установщик идемпотентен: повторный запуск безопасен, уже созданные части пропускаются.
 - Пароли не попадают в репозиторий: `config.php`, `.env`, `data/*.db` — в `.gitignore`.
