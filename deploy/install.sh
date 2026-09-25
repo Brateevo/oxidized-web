@@ -13,8 +13,8 @@
 #  Target: Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 (amd64).
 #  Run as root:   sudo bash deploy/install.sh
 #  INTERACTIVE: the wizard asks for every value below (default shown in [..]).
-#               Rendered as dialog boxes (dialog/whiptail, iRedMail-style) on a
-#               tty, with a plain-prompt fallback for non-tty/rerun runs.
+#               Rendered as dialog boxes (dialog/whiptail) on a tty, with a
+#               plain-prompt fallback for non-tty/rerun runs.
 #               Empty password = random generation.
 #               Last questions: SSH login/password (and optional ENABLE secret)
 #               Oxidized uses to read device configs, then map choices:
@@ -68,11 +68,11 @@ if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
 fi
 
 # --- dialog/whiptail TUI -----------------------------------------------------
-# The wizard is rendered as dialog boxes (the look iRedMail uses: a blue title
-# bar, a message body and "< Yes > / < No >" buttons) when `dialog` or
-# `whiptail` is available on an interactive terminal. On a non-tty run, or a box
-# without either tool, every prompt falls back to a plain stdin read so
-# unattended/rerun installs keep working exactly as before.
+# The wizard is rendered as dialog boxes (a blue title bar, a message body and
+# "< Yes > / < No >" buttons) when `dialog` or `whiptail` is available on an
+# interactive terminal. On a non-tty run, or a box without either tool, every
+# prompt falls back to a plain stdin read so unattended/rerun installs keep
+# working exactly as before.
 WT_TITLE="oxidized-web + LibreNMS setup"
 WT=""
 ensure_tui() {
