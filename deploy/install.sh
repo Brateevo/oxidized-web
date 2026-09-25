@@ -328,7 +328,7 @@ fi
 if [ "$PHP_VER" = "8.4" ]; then
   warn "only PHP 8.4 is available - LibreNMS recommends 8.5"
 fi
-PHP_FPM_BIN="php${PHP_VER}-fpm"
+PHP_FPM_BIN="php-fpm${PHP_VER}"
 SYSTEM_DEFAULT_PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"
 PHP_PKGS=""
 for mod in $PHP_MODULES; do PHP_PKGS="$PHP_PKGS php${PHP_VER}-${mod}"; done
