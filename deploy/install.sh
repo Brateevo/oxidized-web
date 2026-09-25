@@ -15,13 +15,15 @@
 #  INTERACTIVE: the script asks for every value below (default shown in [..]).
 #               Empty password = random generation.
 #               Last questions: SSH login/password (and optional ENABLE secret)
-#               Oxidized uses to read device configs.
+#               Oxidized uses to read device configs, then map choices:
+#               basemap (openstreetmap/yandex) and the "Map" link service
+#               (yandex/google) next to device coordinates in LibreNMS.
 #  Idempotent: rerun reapplies migrations/config and validates the stack.
 # =============================================================================
 set -Eeuo pipefail
 umask 077
 
-C_B=""; C_N=""; C_G=""; C_Y=""; C_R=""
+C_B=""; C_N=""; C_G=""; C_Y=""; C_R=""; C_BLU=""
 log()  { echo -e "${C_G}[install]${C_N} $*"; }
 warn() { echo -e "${C_Y}[warn]${C_N} $*"; }
 die()  { echo -e "${C_R}[error]${C_N} $*" >&2; exit 1; }
@@ -60,7 +62,7 @@ APP_DIR="/opt/oxidized-web"
 
 # colours are optional under a non-tty shell.
 if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
-    C_B=$(tput bold); C_N=$(tput sgr0); C_G=$(tput setaf 2); C_Y=$(tput setaf 3); C_R=$(tput setaf 1)
+    C_B=$(tput bold); C_N=$(tput sgr0); C_G=$(tput setaf 2); C_Y=$(tput setaf 3); C_R=$(tput setaf 1); C_BLU=$(tput setaf 4)
 fi
 
 ask() { # ask "<prompt>" <varname> [default]
@@ -70,8 +72,22 @@ ask() { # ask "<prompt>" <varname> [default]
     if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
     val=""
     # EOF-safe: read returns 1 at end of input, which set -e must not treat as fatal
-    read -r -p "${C_B}${prompt}${C_N} ${def:+[$def] }" val || true
+    read -r -p "${C_B}${C_BLU}${prompt}${C_N} ${def:+[$def] }" val || true
     printf -v "$var" '%s' "${val:-$def}"
+}
+
+ask_choice() { # ask_choice "<prompt>" <varname> "<choice1/choice2>" <default>
+    local prompt="$1" var="$2" choices="$3" def="${4:-}" val
+    # automated/redirected reruns (no tty) reuse loaded secrets
+    if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
+    while :; do
+        read -r -p "${C_B}${C_BLU}${prompt}${C_N} (${choices}) [${def}] " val || true
+        val="${val:-$def}"
+        case "/${choices}/" in
+            */"$val"/*) printf -v "$var" '%s' "$val"; return;;
+            *) warn "Допустимые значения: ${choices} (введено: ${val})";;
+        esac
+    done
 }
 
 ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
@@ -79,7 +95,7 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
     if [ ! -t 0 ] && [ -n "${!var:-}" ]; then return; fi
     while :; do
         p1=""
-        read -r -s -p "${C_B}${prompt}${C_N} (пусто = сгенерировать) " || true
+        read -r -s -p "${C_B}${C_BLU}${prompt}${C_N} (пусто = сгенерировать) " || true
         p1="$REPLY"; echo
         if [ -z "$p1" ]; then
             p1="$def"
@@ -92,7 +108,7 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
             continue
         fi
         p2=""
-        read -r -s -p "  повторите: " || true
+        read -r -s -p "${C_B}${C_BLU}  повторите:${C_N} " || true
         p2="$REPLY"; echo
         [ "$p1" = "$p2" ] && { printf -v "$var" '%s' "$p1"; return; }
         warn "Пароли не совпадают, попробуйте ещё раз."
@@ -104,7 +120,7 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
 }
 
 # ------------------------------------------------------------------ wizard ---
-log "═══ Настройка стека (нажмите Enter = значение по умолчанию) ═══"
+echo -e "${C_B}${C_BLU}═══ Настройка стека (Enter = значение по умолчанию) ═══${C_N}"
 
 # Reuse credentials/settings from a previous run so a rerun never churns the
 # DB passwords (the running stack keeps the old values, so keeping defaults
@@ -170,6 +186,13 @@ OX_DV_PASS="${OX_DV_PASS:-$(gen_secret 16)}"
 ask_pass "Пароль устройства для Oxidized (SSH/telnet):" OX_DV_PASS "$OX_DV_PASS"
 ask_pass "ENABLE-пароль устройства (опционально):"      OX_ENABLE   "${OX_ENABLE:-}"
 
+# Карты LibreNMS: подложка (обратите внимание, Яндекс использует свой тайловый
+# сервер, OSM - публичные тайлы) и сервис для кнопки "Map" у координат устройства.
+LX_MAP_VIEW="${LX_MAP_VIEW:-yandex}"
+ask_choice "Подложка карт LibreNMS?"      LX_MAP_VIEW  "openstreetmap/yandex" "$LX_MAP_VIEW"
+LX_MAP_LINK="${LX_MAP_LINK:-yandex}"
+ask_choice "Сервис кнопки \"Map\" у устройства?"  LX_MAP_LINK  "yandex/google" "$LX_MAP_LINK"
+
 APP_URL_DEFAULT="http://${LX_SITE_FQDN}"
 [ "${LX_SITE_PORT}" = "80" ] || APP_URL_DEFAULT="http://${LX_SITE_FQDN}:${LX_SITE_PORT}"
 ask "FQDN для исходящих ссылок LibreNMS (base_url)?" LX_APP_URL "${LX_APP_URL:-$APP_URL_DEFAULT}"
@@ -205,6 +228,8 @@ valid_port "$LX_SITE_PORT" && valid_port "$OXWEB_PORT" && valid_port "$OX_PORT" 
 [ "$LX_SITE_PORT" != "$OXWEB_PORT" ] && [ "$LX_SITE_PORT" != "$OX_PORT" ] && [ "$OXWEB_PORT" != "$OX_PORT" ] || die "LibreNMS, oxidized-web and Oxidized must use different ports."
 [[ "$OX_HOST" = 127.0.0.1 || "$OX_HOST" = localhost ]] || die "Oxidized REST is unauthenticated; it must bind only to 127.0.0.1 or localhost."
 [[ "$LX_DEFAULT_GROUP" =~ ^[A-Za-z0-9_.-]+$ ]] || die "Oxidized default group may contain only letters, digits, dot, underscore, and hyphen."
+case "$LX_MAP_VIEW" in openstreetmap|yandex) ;; *) die "LX_MAP_VIEW must be openstreetmap or yandex";; esac
+case "$LX_MAP_LINK" in yandex|google) ;; *) die "LX_MAP_LINK must be yandex or google";; esac
 if [[ "$LX_APP_URL" =~ ^https?://([^/:]+)(:([0-9]{1,5}))?/?$ ]]; then
   APP_URL_HOST="${BASH_REMATCH[1]}"
   APP_URL_PORT="${BASH_REMATCH[3]:-}"
@@ -234,6 +259,7 @@ warn "Значения приняты. Установка начнётся. Па
   printf 'OX_WEB_ADMIN_USER=%q\nOX_WEB_ADMIN_PASS=%q\nLX_SITE_FQDN=%q\nLX_SITE_PORT=%q\n' "$OX_WEB_ADMIN_USER" "$OX_WEB_ADMIN_PASS" "$LX_SITE_FQDN" "$LX_SITE_PORT"
   printf 'OXWEB_FQDN=%q\nOXWEB_PORT=%q\nOX_HOST=%q\nOX_PORT=%q\nLX_DEFAULT_GROUP=%q\n' "$OXWEB_FQDN" "$OXWEB_PORT" "$OX_HOST" "$OX_PORT" "$LX_DEFAULT_GROUP"
   printf 'LX_APP_URL=%q\nOX_DV_USER=%q\nOX_DV_PASS=%q\nOX_ENABLE=%q\n' "$LX_APP_URL" "$OX_DV_USER" "$OX_DV_PASS" "$OX_ENABLE"
+  printf 'LX_MAP_VIEW=%q\nLX_MAP_LINK=%q\n' "$LX_MAP_VIEW" "$LX_MAP_LINK"
 } > /root/oxidized-web-deploy.secrets
 chmod 600 /root/oxidized-web-deploy.secrets
 
@@ -527,6 +553,163 @@ mv -f "$LX_CFG_TMP" "$LX_CFG"
 # clear, a previously broken/empty config.php stays cached and Oxidized stays
 # hidden in the UI even after the file is fixed.
 su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/null 2>&1 || die "LibreNMS config cache clear failed"
+
+# ---- Map backend for LibreNMS --------------------------------------------
+# LX_MAP_VIEW  openstreetmap|yandex : basemap used by all LibreNMS map pages.
+#   Yandex core-renderer tiles use ellipsoidal Mercator (EPSG:3395), Leaflet
+#   assumes spherical web Mercator (EPSG:3857); without a matching CRS the tile
+#   grid is offset by up to ~0.18 deg of latitude, so a matching JS + DB change
+#   is only applied when Yandex was chosen. openstreetmap keeps the stock setup.
+# LX_MAP_LINK  yandex|google : provider opened by the "Map" button next to the
+#   device coordinates (device overview + draggable marker handler).
+# All edits are idempotent and reapplied on every installer run, so they also
+# survive upstream `git pull` upgrades that restore pristine files.
+if [ "$LX_MAP_VIEW" = "yandex" ]; then
+  mysql -e "INSERT INTO ${LX_DB_NAME}.config (config_name, config_value) VALUES ('leaflet.tile_url', 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z={z}&scale=1&lang=ru_RU') ON DUPLICATE KEY UPDATE config_value=VALUES(config_value);" \
+    || die "could not set leaflet.tile_url in LibreNMS config"
+else
+  # openstreetmap: drop the override so LibreNMS falls back to its stock tiles
+  mysql -e "DELETE FROM ${LX_DB_NAME}.config WHERE config_name='leaflet.tile_url';" \
+    || die "could not clear leaflet.tile_url in LibreNMS config"
+fi
+export LX_MAP_VIEW LX_MAP_LINK
+python3 - <<'PYEOF'
+import os, re
+
+MAP_VIEW = os.environ.get("LX_MAP_VIEW", "yandex")
+MAP_LINK = os.environ.get("LX_MAP_LINK", "yandex")
+
+def status(msg):
+    print("  map-patch:", msg, flush=True)
+
+def write_file(path, data):
+    tmp = path + ".map.tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(data)
+    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    os.replace(tmp, path)
+
+def swap_once(path, old, new, label):
+    data = open(path, encoding="utf-8").read()
+    if new in data:
+        return
+    n = data.count(old)
+    assert n == 1, (path, label, "anchor count", n)
+    status("%s: %s" % (label, path.split("/")[-1]))
+    write_file(path, data.replace(old, new, 1))
+
+# CRS fix for Yandex basemap (stock librenms.js kept for openstreetmap)
+if MAP_VIEW == "yandex":
+    js = "/opt/librenms/html/js/librenms.js"
+    src = open(js, encoding="utf-8").read()
+
+    crs_block = """
+// Yandex core-renderer tiles are in ellipsoidal Mercator (EPSG:3395), but Leaflet
+// normally assumes spherical web Mercator (EPSG:3857). The mismatch shifts the tile
+// grid by a few kilometres (up to ~0.18 degrees of latitude). Use a custom CRS so
+// tiles, markers and coordinates stay aligned.
+L.Projection.EllipsoidMercator = {
+    R: 6378137.0,
+    E: 0.0818191908426214943348,
+    project: function (latlng) {
+        var d = Math.PI / 180,
+            e = this.E, R = this.R,
+            lat = latlng.lat * d, lon = latlng.lng * d,
+            s = Math.sin(lat),
+            factor = Math.pow((1 - e * s) / (1 + e * s), e / 2);
+        return new L.Point(R * lon, R * (Math.log(Math.tan(Math.PI / 4 + lat / 2)) + Math.log(factor)));
+    },
+    unproject: function (point) {
+        var d = Math.PI / 180,
+            e = this.E, R = this.R,
+            y = point.y, lon = point.x / R / d,
+            phi = 0;
+        for (var i = 0; i < 10; i++) {
+            var s = Math.sin(phi),
+                factor = Math.pow((1 - e * s) / (1 + e * s), e / 2);
+            phi = 2 * Math.atan(Math.exp(y / R) / factor) - Math.PI / 2;
+        }
+        return new L.LatLng(phi / d, lon);
+    }
+};
+
+L.CRS.EPSG3395 = L.extend({}, L.CRS.EPSG3857, {
+    code: 'EPSG:3395',
+    projection: L.Projection.EllipsoidMercator
+});
+"""
+
+    changed = False
+    if "L.CRS.EPSG3395" not in src:
+        anchor = "\nfunction init_map(id, config = {}) {"
+        assert src.count(anchor) == 1, "init_map anchor not unique"
+        src = src.replace(anchor, crs_block + anchor, 1)
+        changed = True
+
+    if "const map_crs" not in src:
+        map_crs = "    const map_crs = (config.tile_url && /core-renderer-tiles\\.maps\\.yandex\\.net/i.test(build_tile_url(config.tile_url))) ? L.CRS.EPSG3395 : L.CRS.EPSG3857;"
+        anchor = "    leaflet = L.map(id, {\n"
+        assert src.count(anchor) == 1, "L.map anchor not unique"
+        src = src.replace(anchor, map_crs + "\n" + anchor + "        crs: map_crs,\n", 1)
+        changed = True
+
+    if changed:
+        status("librenms.js: applying Yandex EPSG3395 CRS patch")
+        if "L.CRS.EPSG3395" not in src:
+            raise SystemExit("librenms.js CRS block missing after patch")
+        write_file(js, src)
+
+# tile_url must reach the JS config safely in both modes
+fb = "/opt/librenms/resources/views/map/fullscreen.blade.php"
+data = open(fb, encoding="utf-8").read()
+if "@json($tile_url)" not in data:
+    old = '"tile_url": "{{$tile_url}}"'
+    new = '"tile_url": @json($tile_url)'
+    assert data.count(old) == 1, "fullscreen tile_url anchor"
+    status("fullscreen.blade.php: tile_url via @json")
+    write_file(fb, data.replace(old, new, 1))
+
+# route method must be callable by the maps UI in both modes
+ctrl = "/opt/librenms/app/Http/Controllers/Maps/FullscreenMapController.php"
+data = open(ctrl, encoding="utf-8").read()
+if "public function fullscreenMap" not in data:
+    old = "    protected function fullscreenMap(Request $request): View|RedirectResponse"
+    new = "    public function fullscreenMap(Request $request): View|RedirectResponse"
+    assert data.count(old) == 1, "controller anchor"
+    status("FullscreenMapController: method public")
+    write_file(ctrl, data.replace(old, new, 1))
+
+# "Map" button target: static link (device overview) + draggable-marker handler
+static_google = "https://maps.google.com/?q={{ $device->location->lat }},{{ $device->location->lng }}"
+static_yandex = "https://yandex.ru/maps/?ll={{ $device->location->lng }},{{ $device->location->lat }}&pt={{ $device->location->lng }},{{ $device->location->lat }}&z=17&l=map"
+js_google = '"https://maps.google.com/?q=" + new_location.lat + "," + new_location.lng'
+js_yandex = '"https://yandex.ru/maps/?ll=" + new_location.lng + "," + new_location.lat + "&pt=" + new_location.lng + "," + new_location.lat + "&z=17&l=map"'
+sysv = "/opt/librenms/resources/views/components/device/overview/system.blade.php"
+gm = "/opt/librenms/resources/views/components/geo-map.blade.php"
+if MAP_LINK == "yandex":
+    swap_once(sysv, static_google, static_yandex, "Map link -> Yandex")
+    swap_once(gm, js_google, js_yandex, "Map link -> Yandex")
+else:
+    swap_once(sysv, static_yandex, static_google, "Map link -> Google")
+    swap_once(gm, js_yandex, js_google, "Map link -> Google")
+
+# only the Yandex basemap changes librenms.js, so bump its asset version then
+if MAP_VIEW == "yandex":
+    lay = "/opt/librenms/resources/views/layouts/librenmsv1.blade.php"
+    data = open(lay, encoding="utf-8").read()
+    if "librenms.js?ver=20260925-yandex" not in data:
+        new, n = re.subn(r"js/librenms\.js\?ver=[A-Za-z0-9_.-]*",
+                         "js/librenms.js?ver=20260925-yandex", data, count=1)
+        assert n == 1, "librenmsv1 asset anchor"
+        status("librenmsv1.blade.php: librenms.js asset version bumped")
+        write_file(lay, new)
+
+print("  map-patch: DONE", flush=True)
+PYEOF
+# Rebuild both caches after file + DB modifications
+su -s /bin/bash librenms -c "cd /opt/librenms && php artisan view:clear" >/dev/null 2>&1 || die "LibreNMS view clear failed"
+su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/null 2>&1 || die "LibreNMS config cache clear failed"
+log "installed map setup: view=${LX_MAP_VIEW}, Map link=${LX_MAP_LINK}"
 
 # LibreNMS nginx + fpm
 log "== Phase 3: nginx + php-fpm (LibreNMS) ================================="

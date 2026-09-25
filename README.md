@@ -14,6 +14,11 @@ Web-интерфейс поверх **Oxidized** (резервное копир�
 
 ![Дашборд устройств — OxidizedWeb](docs/screenshots/oxidized-web-dashboard.png)
 
+Интерактивный мастер установки (`deploy/install.sh`) — синие промпты с вариантами
+(подложка карт LibreNMS, сервис кнопки «Map», пароли, порты):
+
+![Мастер установки — install.sh](docs/install-wizard.png)
+
 ## Состав репозитория
 
 | Путь | Назначение |
@@ -130,9 +135,21 @@ sudo bash deploy/install.sh
       `username/password/vars.enable`) и перезапустить Oxidized.
 - [ ] Если хост доступен извне — настроить TLS (nginx) и ограничить порт 8889.
 
-### Яндекс-карта в LibreNMS
+### Карты LibreNMS (подложка и кнопка «Map»)
 
-В картах LibreNMS настроена подложка **Yandex Maps** (`leaflet.tile_url`):
+При установке `deploy/install.sh` спрашивает два параметра:
+
+- **Подложка карт LibreNMS** (`LX_MAP_VIEW`): `openstreetmap` или `yandex`.
+  Оба варианта отдаются через `fullscreen.blade.php` (`@json($tile_url)`), метод
+  контроллера сделан `public` — карты полноэкранной страницы работают в любом случае.
+- **Сервис кнопки «Map»** у координат устройства (`LX_MAP_LINK`): `yandex` или
+  `google`. Заменяет ссылку в `system.blade.php` и обработчик перетаскивания
+  маркера в `geo-map.blade.php`.
+
+Выбранные значения сохраняются в `/root/oxidized-web-deploy.secrets`; повторный
+запуск установщика использует их как дефолты и идемпотентно переприменяет правки.
+
+Если выбрана **Yandex** подложка, применяется корректировка EPSG:3395:
 
 ```
 https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z={z}&scale=1&lang=ru_RU
@@ -141,14 +158,15 @@ https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z
 - Тайлы Яндекса отдаются в **эллипсоидном** меркаторе (EPSG:3395), а Leaflet по
   умолчанию рисует их в сферическом (EPSG:3857) — без коррекции маркеры и карта
   смещены примерно на 0.18° широты (≈20 км к северу).
-- В `html/js/librenms.js` добавлен кастомный CRS `L.CRS.EPSG3395` (forward/unproject
+- В `html/js/librenms.js` добавляется кастомный CRS `L.CRS.EPSG3395` (forward/unproject
   на эллипсоиде WGS84), который включается автоматически для URL
   `core-renderer-tiles.maps.yandex.net` и передаётся в `L.map(id, { crs })`.
-- Страница полноэкранной карты `/maps/fullscreenmap` отдаёт `tile_url` в конфиг
-  карты через `@json(...)`, поэтому Яндекс-подложка работает и там.
 
-> Внимание: правки в `html/js/librenms.js` и `FullscreenMapController.php` перезапишутся
-> при обновлении LibreNMS (`git pull`/апгрейд) — после обновления нужно повторить патч.
+> Все правки (кастомный CRS, `@json($tile_url)`, `public fullscreenMap`, ссылка
+> на Яндекс.Карты, версия ассета) **применяет `deploy/install.sh` идемпотентно** на
+> каждом запуске. Поэтому после `git pull`/апгрейда LibreNMS достаточно просто
+> перезапустить установщик — патчи наложатся снова. Вручную (без установщика)
+> патчи из раздела «Ручная установка» ниже нужно повторять после апгрейда.
 
 ## Ручная установка (если стек уже стоит)
 
