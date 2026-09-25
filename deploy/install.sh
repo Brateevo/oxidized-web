@@ -565,7 +565,13 @@ su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/nu
 # All edits are idempotent and reapplied on every installer run, so they also
 # survive upstream `git pull` upgrades that restore pristine files.
 if [ "$LX_MAP_VIEW" = "yandex" ]; then
-  mysql -e "INSERT INTO ${LX_DB_NAME}.config (config_name, config_value) VALUES ('leaflet.tile_url', 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z={z}&scale=1&lang=ru_RU') ON DUPLICATE KEY UPDATE config_value=VALUES(config_value);" \
+  # config_value is stored JSON-encoded (the DB row must be readable via
+  # json_decode without quoting issues), then flush the LibreNMS config cache
+  # so leaflet.tile_url is picked up from the database immediately.
+  YMAP_URL='https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z={z}&scale=1&lang=ru_RU'
+  YMAP_JSON=$(printf '%s' "$YMAP_URL" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))') \
+    || die "could not JSON-encode Yandex tile url"
+  mysql -e "INSERT INTO ${LX_DB_NAME}.config (config_name, config_value) VALUES ('leaflet.tile_url', '${YMAP_JSON}') ON DUPLICATE KEY UPDATE config_value=VALUES(config_value);" \
     || die "could not set leaflet.tile_url in LibreNMS config"
 else
   # openstreetmap: drop the override so LibreNMS falls back to its stock tiles
@@ -653,6 +659,20 @@ L.CRS.EPSG3395 = L.extend({}, L.CRS.EPSG3857, {
         src = src.replace(anchor, map_crs + "\n" + anchor + "        crs: map_crs,\n", 1)
         changed = True
 
+    # drop the stock "Leaflet" attribution prefix + replace the OSM label in the
+    # tile layer with a Russian flag + "Яндекс" caption
+    if "setPrefix" not in src:
+        anchor = "    window.maps[id] = leaflet;\n"
+        assert src.count(anchor) == 1, "attribution prefix anchor"
+        src = src.replace(anchor, anchor + "    if (leaflet.attributionControl) { leaflet.attributionControl.setPrefix(''); }\n", 1)
+        changed = True
+
+    attribution_old = "            attribution: '&copy; <a href=\"http://www.openstreetmap.org/copyright\">OpenStreetMap</a>'"
+    attribution_new = "            attribution: '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18\" height=\"12\" viewBox=\"0 0 18 12\" style=\"vertical-align:-2px\"><rect width=\"18\" height=\"4\" fill=\"white\"/><rect y=\"4\" width=\"18\" height=\"4\" fill=\"#0039A6\"/><rect y=\"8\" width=\"18\" height=\"4\" fill=\"#D52B1E\"/></svg> Яндекс'"
+    if attribution_old in src:
+        src = src.replace(attribution_old, attribution_new, 1)
+        changed = True
+
     if changed:
         status("librenms.js: applying Yandex EPSG3395 CRS patch")
         if "L.CRS.EPSG3395" not in src:
@@ -708,6 +728,7 @@ print("  map-patch: DONE", flush=True)
 PYEOF
 # Rebuild both caches after file + DB modifications
 su -s /bin/bash librenms -c "cd /opt/librenms && php artisan view:clear" >/dev/null 2>&1 || die "LibreNMS view clear failed"
+su -s /bin/bash librenms -c "cd /opt/librenms && php artisan cache:clear" >/dev/null 2>&1 || die "LibreNMS app cache clear failed"
 su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:clear" >/dev/null 2>&1 || die "LibreNMS config cache clear failed"
 log "installed map setup: view=${LX_MAP_VIEW}, Map link=${LX_MAP_LINK}"
 
