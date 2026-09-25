@@ -121,6 +121,37 @@ tui_choice() { # "<prompt>" "<default>" <choice...> -> stdout
     printf '%s' "$out"
 }
 
+# Plain-console password read that echoes one '*' per typed character so the
+# operator can see how long the password is while it stays invisible. Backspace
+# and DEL remove the last asterisk. The value is stored in <varname> (not
+# captured via $(...) so the progress output never lands inside the value).
+read_masked() { # "<prompt>" <varname>
+    local prompt="$1" var="$2" val="" ch
+    printf '%s' "$prompt"
+    while :; do
+        read -r -s -N1 ch || break          # EOF (Ctrl-D)
+        case "$ch" in
+            $'\n'|$'\r')                    # Enter
+                printf '\n'
+                printf -v "$var" '%s' "$val"
+                return 0
+                ;;
+            $'\b'|$'\x7f')                  # Backspace / DEL
+                if [ -n "$val" ]; then
+                    val="${val%?}"
+                    printf '\b \b'
+                fi
+                ;;
+            *)
+                val="${val}${ch}"
+                printf '*'
+                ;;
+        esac
+    done
+    printf '\n'
+    printf -v "$var" '%s' "$val"
+}
+
 ask() { # ask "<prompt>" <varname> [default]
     local prompt="$1" var="$2" def="${3:-}" val
     # automated/redirected reruns (no tty) reuse values already loaded from
@@ -182,8 +213,12 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
             continue
         fi
         p1=""
-        read -r -s -p "${C_B}${C_BLU}${prompt}${C_N} (пусто = сгенерировать) " || true
-        p1="$REPLY"; echo
+        if [ -t 0 ]; then
+            read_masked "${C_B}${C_BLU}${prompt}${C_N} (пусто = сгенерировать) " p1
+        else
+            read -r -s -p "${C_B}${C_BLU}${prompt}${C_N} (пусто = сгенерировать) " || true
+            p1="$REPLY"; echo
+        fi
         if [ -z "$p1" ]; then
             p1="$def"
             printf -v "$var" '%s' "$p1"
@@ -195,8 +230,12 @@ ask_pass() { # ask_pass "<prompt>" <varname> <default> [minlen]
             continue
         fi
         p2=""
-        read -r -s -p "${C_B}${C_BLU}  повторите:${C_N} " || true
-        p2="$REPLY"; echo
+        if [ -t 0 ]; then
+            read_masked "${C_B}${C_BLU}  повторите:${C_N} " p2
+        else
+            read -r -s -p "${C_B}${C_BLU}  повторите:${C_N} " || true
+            p2="$REPLY"; echo
+        fi
         [ "$p1" = "$p2" ] && { printf -v "$var" '%s' "$p1"; return; }
         warn "Пароли не совпадают, попробуйте ещё раз."
         # no tty (automated run): a mismatch would loop forever on EOF -> fall back
