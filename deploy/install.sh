@@ -631,6 +631,11 @@ if [ -f /opt/librenms/requirements.txt ]; then
   python3 -m pip install "${PIP_SYSTEM_FLAG[@]}" -r /opt/librenms/requirements.txt 2>&1 | tail -5 || \
     die "LibreNMS Python dependencies failed to install; polling would not work"
 fi
+# Like the gem tree above: the global umask 077 at the top of this script makes
+# pip drop site-packages directories as 700 root, so the unprivileged librenms
+# user cannot import psutil/command_runner/PyMySQL and every cron poll crashes
+# silently (validate.php: "Python3 module issue", "poller is not running").
+chmod -R a+rX /usr/local/lib/python3*/dist-packages 2>/dev/null || true
 
 # ---- modern extras: maintenance scheduler + admin convenience --------------
 # LibreNMS 26 schedules its maintenance tasks through Laravel; validate.php
