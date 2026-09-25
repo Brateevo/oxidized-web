@@ -336,7 +336,7 @@ log "Using PHP: ${PHP_VER} (${PHP_FPM_BIN})"
 apt-get install -y $PHP_PKGS
 command -v "$PHP_FPM_BIN" >/dev/null || die "${PHP_FPM_BIN} was not installed"
 for ext in curl gd gmp intl mbstring mysqli pdo_mysql pdo_sqlite redis snmp sqlite3 xml zip; do
-  php -m | tr '[:upper:]' '[:lower:]' | grep -qx "$ext" || die "PHP ${PHP_VER} extension missing after package install: ${ext}"
+  php${PHP_VER} -m | tr '[:upper:]' '[:lower:]' | grep -qx "$ext" || die "PHP ${PHP_VER} extension missing after package install: ${ext}"
 done
 # The META packages pulled in by other deps (e.g. apt 'composer' -> php-cli)
 # register the plain "php" alternative to the newest *meta* line, which may be
