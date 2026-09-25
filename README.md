@@ -107,8 +107,11 @@ sudo bash deploy/install.sh
 
 ### Шаг 4. Что делает скрипт по фазам
 
-1. **Phase 0 — база**: `apt-get` ставит nginx, MariaDB, Redis, PHP-FPM (+ модули
-   `pdo_mysql`, `curl`, `sqlite3`, `mbstring` и др.), rrdtool, snmp, composer, ruby, git.
+1. **Phase 0 — база**: сначала выбирается и ставится самая свежая **PHP 8.5+** (через
+   `ppa:ondrej/php`, весь набор модулей `pdo_mysql`, `curl`, `sqlite3`, `mbstring`, `redis` и др.),
+   которая фиксируется в альтернативах и поверх которой резолвятся виртуальные зависимости
+   (`php-cli` от composer) — Ubuntu-строки 8.3/8.4 не подтягиваются. Затем `apt-get` ставит
+   nginx, MariaDB, Redis, PHP-FPM (+ модули), rrdtool, snmp, composer, ruby, git.
    PHP-версия определяется автоматически.
 2. **Phase 1 — MariaDB**: создаёт БД `librenms`, пользователя `librenms` (`ALL`) и
    read-only `oxidized_web` (только `SELECT` на нужные столбцы `devices` и `locations`,

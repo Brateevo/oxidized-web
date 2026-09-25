@@ -380,22 +380,6 @@ log "== Phase 0: base packages ==============================================="
 CURRENT_PHASE="phase 0: packages and PHP"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip dialog \
-    software-properties-common ca-certificates openssl redis-server cron \
-    nginx mariadb-server mariadb-client \
-    python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
-    composer
-# ruby + native-devel for the oxidized (rugged/libgit2) gem build.
-# rugged vendors libgit2 and builds it with cmake; libssh2/libcurl are needed
-# for the SSH/HTTPS transports. Missing any of these -> "ERROR: Failed to build
-# gem native extension" when installing the oxidized gem.
-apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
-    libsqlite3-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
-# fping: LibreNMS availability/ping checks (DeviceIsPingable) exec it; without
-# it every device is "Could not ping" and gets added as down.
-# libicu-dev: builds charlock_holmes, a native dep of the oxidized-web gem
-# (Oxidized >=0.35 moved its REST API from "rest:" to the oxidized-web gem).
-apt-get install -y fping libicu-dev
 
 # --- newest PHP (LibreNMS web requires >= 8.5) ---------------------------------
 # Official LibreNMS docs require PHP 8.5 minimum. Ubuntu 24.04 itself only ships
@@ -407,6 +391,7 @@ apt-get install -y fping libicu-dev
 # PHP >= 8.5 exists we abort - LibreNMS web will NOT run on PHP < 8.5.
 # Debian uses packages.sury.org; Ubuntu uses the Ondrej PHP PPA.
 if [ "$ID" = ubuntu ]; then
+  apt-get install -y software-properties-common
   add-apt-repository -y ppa:ondrej/php || die "could not add ppa:ondrej/php"
 else
   apt-get install -y apt-transport-https
@@ -441,7 +426,11 @@ SYSTEM_DEFAULT_PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"
 PHP_PKGS=""
 for mod in $PHP_MODULES; do PHP_PKGS="$PHP_PKGS php${PHP_VER}-${mod}"; done
 log "Using PHP: ${PHP_VER} (${PHP_FPM_BIN})"
+# Install OUR PHP line first: virtual php-cli/php-fpm dependencies (pulled in by
+# composer and friends) must resolve to 8.5+, not to the distro's stock 8.3/8.4.
 apt-get install -y $PHP_PKGS
+# Drop leftover phpX.Y from earlier runs/attempts so only 8.5+ stays installed.
+apt-get purge -y $(dpkg -l 2>/dev/null | awk '/^ii  php[0-9]+\.[0-9]+-/ {print $2}' | grep -v "^php${PHP_VER}-") 2>/dev/null || true
 command -v "$PHP_FPM_BIN" >/dev/null || die "${PHP_FPM_BIN} was not installed"
 for ext in curl gd gmp intl mbstring mysqli pdo_mysql pdo_sqlite redis snmp sqlite3 xml zip; do
   php${PHP_VER} -m | tr '[:upper:]' '[:lower:]' | grep -qx "$ext" || die "PHP ${PHP_VER} extension missing after package install: ${ext}"
@@ -458,6 +447,23 @@ if [ -x "/usr/bin/php${PHP_VER}" ] && command -v update-alternatives >/dev/null 
   log "forced /usr/bin/php -> php${PHP_VER}"
 fi
 php -r 'exit((PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION) === $argv[1] ? 0 : 1);' "$PHP_VER" || die "CLI PHP version does not match installed FPM PHP ${PHP_VER}"
+
+apt-get install -y curl wget git snmp snmpd rrdtool whois net-tools unzip dialog \
+    software-properties-common ca-certificates openssl redis-server cron \
+    nginx mariadb-server mariadb-client \
+    python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
+    composer
+# ruby + native-devel for the oxidized (rugged/libgit2) gem build.
+# rugged vendors libgit2 and builds it with cmake; libssh2/libcurl are needed
+# for the SSH/HTTPS transports. Missing any of these -> "ERROR: Failed to build
+# gem native extension" when installing the oxidized gem.
+apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
+    libsqlite3-dev libssl-dev libssh2-1-dev libcurl4-openssl-dev
+# fping: LibreNMS availability/ping checks (DeviceIsPingable) exec it; without
+# it every device is "Could not ping" and gets added as down.
+# libicu-dev: builds charlock_holmes, a native dep of the oxidized-web gem
+# (Oxidized >=0.35 moved its REST API from "rest:" to the oxidized-web gem).
+apt-get install -y fping libicu-dev
 
 # =============================================================================
 log "== Phase 1: MariaDB - databases and accounts ============================"
