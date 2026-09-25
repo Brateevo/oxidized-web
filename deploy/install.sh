@@ -285,16 +285,15 @@ apt-get install -y ruby ruby-dev build-essential cmake pkg-config zlib1g-dev \
 # (Oxidized >=0.35 moved its REST API from "rest:" to the oxidized-web gem).
 apt-get install -y fping libicu-dev
 
-# --- newest PHP (LibreNMS requires >= 8.4; recommended 8.5) -------------------
-# Official LibreNMS docs: "minimum supported PHP version is 8.4, the recommended
-# version is 8.5". Ubuntu 24.04 itself only ships PHP 8.3, so we add the
-# sury.org PPA (ppa:ondrej/php) to get 8.5+ lines and pick the greatest
-# php<X.Y> version >= 8.5 (falling back to 8.4) whose FULL module set is
-# available in apt. A brand-new PHP line often lags a couple of modules
-# (php-redis is usually the last one to be rebuilt), so "newest" is tried first
-# and we step back one line until a complete set >= 8.4 is found. If the PPA is
-# unreachable and no complete PHP >= 8.4 exists we abort - LibreNMS will NOT run
-# on PHP 8.3. Debian uses packages.sury.org; Ubuntu uses the Ondrej PHP PPA.
+# --- newest PHP (LibreNMS web requires >= 8.5) ---------------------------------
+# Official LibreNMS docs require PHP 8.5 minimum. Ubuntu 24.04 itself only ships
+# PHP 8.3, so we add the sury.org PPA (ppa:ondrej/php) to get 8.5+ lines and pick
+# the greatest php<X.Y> version >= 8.5 whose FULL module set is available in apt.
+# A brand-new PHP line often lags a couple of modules (php-redis is usually the
+# last one to be rebuilt), so "newest" is tried first and we step back one line
+# until a complete set >= 8.5 is found. If the PPA is unreachable and no complete
+# PHP >= 8.5 exists we abort - LibreNMS web will NOT run on PHP < 8.5.
+# Debian uses packages.sury.org; Ubuntu uses the Ondrej PHP PPA.
 if [ "$ID" = ubuntu ]; then
   add-apt-repository -y ppa:ondrej/php || die "could not add ppa:ondrej/php"
 else
@@ -308,8 +307,8 @@ PHP_MODULES="fpm cli mysql curl gd gmp xml mbstring sqlite3 redis bcmath intl zi
 PHP_VER=""
 while IFS= read -r cand; do
   ver="${cand#php}"
-  # skip lines below the LibreNMS minimum (8.4)
-  if echo "$ver" | awk -F. '{exit ($1 > 8 || ($1 == 8 && $2 >= 4)) ? 1 : 0}'; then
+  # skip lines below PHP 8.5 (LibreNMS web requirements)
+  if echo "$ver" | awk -F. '{exit ($1 > 8 || ($1 == 8 && $2 >= 5)) ? 1 : 0}'; then
     continue
   fi
   missing=""
@@ -323,10 +322,7 @@ while IFS= read -r cand; do
   warn "PHP ${ver}: modules not built yet:$missing - stepping back one line"
 done < <(apt-cache search '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null | sed 's/-fpm.*//' | sort -Vr)
 if [ -z "$PHP_VER" ]; then
-  die "no complete PHP >= 8.4 found - LibreNMS requires PHP 8.4+ (recommended 8.5); verify the configured PHP repository"
-fi
-if [ "$PHP_VER" = "8.4" ]; then
-  warn "only PHP 8.4 is available - LibreNMS recommends 8.5"
+  die "no complete PHP >= 8.5 found - LibreNMS web requires PHP 8.5+; verify the configured PHP repository"
 fi
 PHP_FPM_BIN="php-fpm${PHP_VER}"
 SYSTEM_DEFAULT_PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"
