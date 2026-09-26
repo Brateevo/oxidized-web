@@ -922,9 +922,18 @@ rrdcached_set WRITE_JITTER '180'
 rrdcached_set WRITE_THREADS '4'
 rrdcached_set SOCKGROUP 'librenms'
 rrdcached_set SOCKMODE '0664'
-systemctl enable --now rrdcached
+# rrdcached usually already started during "apt-get install" (see Phase 0) with
+# its stock config: harmless defaults, but the socket group/mode/base-restriction
+# we just wrote above only take effect after a restart. "enable --now" would skip
+# restarting an already-active service, so restart explicitly.
+systemctl enable rrdcached
+systemctl restart rrdcached
 sleep 1
 systemctl is-active rrdcached >/dev/null 2>&1 || die "rrdcached failed to start"
+# the socket must actually be writable by the app user - a stale root-owned
+# socket from an earlier start breaks RRD writes with "Permission denied"
+stat -c '%G' /run/rrdcached.sock 2>/dev/null | grep -qx "librenms" \
+  || die "rrdcached socket group is not librenms ($(stat -c '%U:%G' /run/rrdcached.sock 2>/dev/null))"
 # tell LibreNMS to read/write RRDs through the daemon (validate.php wants it)
 su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:set rrdcached unix:/run/rrdcached.sock" >/dev/null 2>&1 \
   || die "failed to configure rrdcached in LibreNMS"
