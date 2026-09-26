@@ -19,6 +19,7 @@ Web-интерфейс поверх **Oxidized** (резервное копир�
 | Путь | Назначение |
 |------|------------|
 | `deploy/install.sh` | **One-shot интерактивный мастер**: ставит весь стек (MariaDB, LibreNMS, Oxidized, nginx, php-fpm, oxidized-web) на голый Debian 12 / Ubuntu 22.04 / 24.04, опрашивая обо всех параметрах |
+| `deploy/apply-maps.sh` | **Автономный скрипт переключения карт** на любой уже существующей LibreNMS (Yandex/OpenStreetMap подложка, Yandex/Google кнопка «Map»), идемпотентный |
 | `deploy/templates/nginx-librenms.conf` | Эталонный виртуальный хост nginx для LibreNMS (используется шаблонами установщика) |
 | `deploy/templates/nginx-oxidized-web.conf` | Эталонный виртуальный хост nginx для oxidized-web |
 | `config.example.php` | Шаблон `config.php` oxidized-web. **Скопируйте в `config.php`** и укажите пароль. Реальный `config.php` в git не попадает (`.gitignore`) |
@@ -176,6 +177,36 @@ https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z
 > каждом запуске. Поэтому после `git pull`/апгрейда LibreNMS достаточно просто
 > перезапустить установщик — патчи наложатся снова. Вручную (без установщика)
 > патчи из раздела «Ручная установка» ниже нужно повторять после апгрейда.
+
+### Переключить карты на уже установленной LibreNMS (`deploy/apply-maps.sh`)
+
+Если стек уже стоит и установщик не нужен — карты переключаются автономным
+скриптом на **любой** LibreNMS-инсталляции (не обязательно созданной этим
+репозиторием):
+
+```bash
+# скачать с Git и запустить (нужны root, mysql и python3 на сервере)
+curl -O https://raw.githubusercontent.com/Brateevo/oxidized-web/main/deploy/apply-maps.sh
+sudo bash apply-maps.sh                           # интерактивно, Yandex по умолчанию
+sudo bash apply-maps.sh --view yandex --link yandex   # подложка Yandex + кнопка «Map» Yandex
+sudo bash apply-maps.sh --view openstreetmap --link google   # откат к OSM + Google
+sudo bash apply-maps.sh --root /opt/librenms      # если LibreNMS в другом каталоге
+```
+
+Что делает скрипт (спека распознаётся автоматически):
+
+- **Подложка** (`--view yandex|openstreetmap`): пишет/удаляет `leaflet.tile_url`
+  в БД LibreNMS (Yandex core-renderer), накладывает или откатывает патч EPSG:3395
+  в `html/js/librenms.js`, правит `fullscreen.blade.php` (`@json($tile_url)`) и
+  делает `fullscreenMap()` публичным — скрытые или изменённые при апгрейде места
+  чинятся снова.
+- **Кнопка «Map»** (`--link yandex|google`): заменяет ссылку координат в
+  `system.blade.php` и обработчик перетаскивания маркера в `geo-map.blade.php`.
+- Сбрасывает кеши (view/cache/config) и восстанавливает владельца файлов.
+- **Идемпотентен**: повторный запуск безопасен, при изменении подложки
+  предыдущие патчи корректно откатываются.
+- Креды БД берёт из `.env` LibreNMS (`DB_DATABASE/DB_USERNAME/DB_PASSWORD`),
+  поэтому отдельной настройки не требует.
 
 ## Ручная установка (если стек уже стоит)
 
