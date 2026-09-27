@@ -491,6 +491,7 @@ apt-get install -y curl wget git snmp snmpd rrdtool rrdcached whois net-tools un
     software-properties-common ca-certificates openssl redis-server cron \
     nginx mariadb-server mariadb-client \
     python3 python3-pip python3-mysqldb python3-dotenv python3-paramiko \
+    acl \
     composer
 # ruby + native-devel for the oxidized (rugged/libgit2) gem build.
 # rugged vendors libgit2 and builds it with cmake; libssh2/libcurl are needed
@@ -611,6 +612,7 @@ else
 fi
 # polling + discovery cron
 cat > /etc/cron.d/librenms <<'CRON'
+*/5 * * * *   root     /usr/local/sbin/librenms-rrd-dirs >/dev/null 2>&1
 */5 * * * *   librenms  /opt/librenms/poller-wrapper.py 16 >> /dev/null 2>&1
 */5 * * * *   librenms  /opt/librenms/discovery-wrapper.py 1 >> /dev/null 2>&1
 15    */6 * * * librenms  /opt/librenms/billing-cron.php >> /dev/null 2>&1
@@ -618,6 +620,30 @@ cat > /etc/cron.d/librenms <<'CRON'
 33   0 * * *   librenms  /opt/librenms/daily.sh >> /dev/null 2>&1
 CRON
 chmod 644 /etc/cron.d/librenms
+
+# rrdtool CLI (LibreNMS RrdProcess) does a LOCAL realpath() before it sends
+# anything to rrdcached, so /opt/librenms/rrd/<host> MUST exist on disk even
+# though the daemon would create it with -R over the direct protocol. Run right
+# before each poll cycle to self-heal every "lnms device:add" (web or CLI).
+cat > /usr/local/sbin/librenms-rrd-dirs <<'RDDIR'
+#!/bin/bash
+# Create /opt/librenms/rrd/<hostname> for every enabled device in the DB.
+# rrdtool create/update through LibreNMS' RrdProcess resolves the relative path
+# on the local disk first; a missing per-device subdir = "realpath(...): No such
+# file or directory" and ZERO graphs. rrdcached -R only helps protocol clients,
+# not the CLI wrapper LibreNMS actually uses.
+RD=/opt/librenms/rrd
+HOSTS="$(mysql -N -B -e "SELECT hostname FROM \`__DBNAME__\`.devices" 2>/dev/null || true)"
+for h in ${HOSTS}; do
+  [ -n "$h" ] || continue
+  mkdir -p "${RD}/${h}"
+  chown -R librenms:librenms "${RD}/${h}"
+done
+exit 0
+RDDIR
+sed -i "s/__DBNAME__/${LX_DB_NAME}/" /usr/local/sbin/librenms-rrd-dirs
+chmod 755 /usr/local/sbin/librenms-rrd-dirs
+/usr/local/sbin/librenms-rrd-dirs
 
 # ---- python deps for the poller/discovery wrappers ------------------------
 # poller-wrapper.py / discovery-wrapper.py import command_runner, psutil,
@@ -651,6 +677,7 @@ else
   die "LibreNMS scheduler service/timer missing from checkout"
 fi
 ln -sf /opt/librenms/lnms /usr/local/bin/lnms
+ln -sf /opt/librenms/lnms /usr/bin/lnms
 systemctl enable --now cron
 mkdir -p /etc/bash_completion.d
 cp /opt/librenms/misc/lnms-completion.bash /etc/bash_completion.d/ 2>/dev/null || true
@@ -904,24 +931,50 @@ CURRENT_PHASE="phase 3: LibreNMS web server"
 mkdir -p /opt/librenms/rrd /opt/librenms/storage/rrd /opt/librenms/bootstrap/cache
 chown -R librenms:librenms /opt/librenms
 chmod 775 /opt/librenms/rrd
+# official LibreNMS layout: /opt/librenms 771 (other users traverse, they don't
+# list it) + default ACL g::rwx on the dirs the unprivileged workers write to,
+# so web (www-data) and CLI (librenms) can both read/write RRDs and logs.
+# "-d" installs the DEFAULT ACL: newly created per-device rrd subdirs inherit
+# group-read/write automatically instead of silently getting 700 (umask 077).
+chmod 771 /opt/librenms
+setfacl -R -m g::rwx /opt/librenms/rrd /opt/librenms/logs /opt/librenms/storage /opt/librenms/bootstrap/cache 2>/dev/null || true
+setfacl -d -m g::rwx /opt/librenms/rrd /opt/librenms/logs /opt/librenms/storage /opt/librenms/bootstrap/cache 2>/dev/null || true
 
 # rrdcached: LibreNMS' validate.php checks the daemon when distributed polling
 # is enabled (which is ON by default in modern LibreNMS). Without it every
 # validate reports FAIL "You have not enabled rrdcached" - and more importantly
 # without the daemon RRD writes fight each other under a multi-worker poller.
-# Ubuntu's rrdcached default config restricts writes to its OWN base dir and
-# gives the socket to root - both break LibreNMS, which writes into
-# /opt/librenms/rrd and runs as the librenms user. So: clear the -B base
-# restriction, keep a sane write/flush cadence and hand the socket to librenms.
-# (SOCKFILE defaults to /var/run/rrdcached.sock which symlinks to /run -
-#  LibreNMS is told exactly that path below via lnms config:set.)
+# Ubuntu's rrdcached default config breaks LibreNMS three ways, and each breaks
+# graph creation: (1) the socket goes to root, (2) BASE_PATH points at
+# /var/lib/rrdcached/db/ while LibreNMS sends RELATIVE paths (resolved against
+# that base -> "realpath(...): No such file or directory") so the base must be
+# LibreNMS' own rrd dir, and (3) with the default flags rrdcached refuses to
+# create per-device subdirs ("No permission to recursively create ... pass -R").
+# rrdcached usually already started during "apt-get install" (Phase 0) with its
+# stock config: these settings only take effect after a restart, and
+# "systemctl enable --now" skips restarting an already-active service, so we
+# restart explicitly below. (SOCKFILE defaults to /var/run/rrdcached.sock which
+# symlinks to /run - LibreNMS is told exactly that path via lnms config:set.)
 rrdcached_set() { sed -i "s/^#\?${1}=.*/${1}=${2}/" /etc/default/rrdcached; }
-rrdcached_set BASE_OPTIONS '""'
-rrdcached_set WRITE_TIMEOUT '600'
-rrdcached_set WRITE_JITTER '180'
+# run the daemon as the app user, not root: otherwise RRDs land with
+# root:root ownership and the unprivileged librenms poller cannot read/write
+# them (graphs come back empty / "Permission denied"). This matches the current
+# official RRDCached docs (DAEMON_USER=librenms) and is what validate.php wants.
+rrdcached_set DAEMON_USER "'librenms'"
+rrdcached_set DAEMON_GROUP "'librenms'"
+rrdcached_set BASE_OPTIONS '"-B -F -R"'
+rrdcached_set BASE_PATH '"/opt/librenms/rrd/"'
+rrdcached_set WRITE_TIMEOUT '1800'
+rrdcached_set WRITE_JITTER '1800'
 rrdcached_set WRITE_THREADS '4'
 rrdcached_set SOCKGROUP 'librenms'
 rrdcached_set SOCKMODE '0664'
+# journal dir: must be owned by the daemon user or rrdcached refuses to start
+# ("journal_replay ... not owned by daemon user"). A journal left over from a
+# previous root-run daemon also blocks startup, so drop stale journal files.
+mkdir -p /var/lib/rrdcached/journal
+chown -R librenms:librenms /var/lib/rrdcached/journal
+rm -f /var/lib/rrdcached/journal/rrd.journal.*
 # rrdcached usually already started during "apt-get install" (see Phase 0) with
 # its stock config: harmless defaults, but the socket group/mode/base-restriction
 # we just wrote above only take effect after a restart. "enable --now" would skip
@@ -934,9 +987,32 @@ systemctl is-active rrdcached >/dev/null 2>&1 || die "rrdcached failed to start"
 # socket from an earlier start breaks RRD writes with "Permission denied"
 stat -c '%G' /run/rrdcached.sock 2>/dev/null | grep -qx "librenms" \
   || die "rrdcached socket group is not librenms ($(stat -c '%U:%G' /run/rrdcached.sock 2>/dev/null))"
+# functional smoke test: creating/updating an RRD through the daemon must work.
+# LibreNMS sends RELATIVE paths (e.g. "10.200.4.1/if_2.rrd") so rrdcached must
+# resolve them against /opt/librenms/rrd (BASE_PATH above). A wrong base gives
+# "realpath: No such file or directory" and a missing -R gives "No permission
+# to recursively create" - either way polling silently produces zero graphs, so
+# verify the exact relative-path create/update through the daemon right here.
+# NOTE: the rrdtool CLI (which LibreNMS spawams via RrdProcess) does a LOCAL
+# realpath() before it talks to the daemon, so the per-device subdir must exist
+# on disk even though the daemon has -R. Hence we create the test RRD inside a
+# fresh subdir to reproduce the real LibreNMS create path.
+mkdir -p /opt/librenms/rrd/__installer_test__
+chown librenms:librenms /opt/librenms/rrd/__installer_test__
+rrdtool create __installer_test__/probe.rrd --step 300 --daemon unix:/run/rrdcached.sock \
+  DS:t:GAUGE:600:0:U RRA:AVERAGE:0.5:1:2 >/dev/null 2>&1 \
+  || die "rrdcached cannot create RRDs (BASE_PATH or -R flag wrong)"
+rrdtool update __installer_test__/probe.rrd --daemon unix:/run/rrdcached.sock N:1 >/dev/null 2>&1 \
+  || die "rrdtool update through rrdcached failed"
+rm -rf /opt/librenms/rrd/__installer_test__
 # tell LibreNMS to read/write RRDs through the daemon (validate.php wants it)
 su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:set rrdcached unix:/run/rrdcached.sock" >/dev/null 2>&1 \
   || die "failed to configure rrdcached in LibreNMS"
+# RRDCached docs: LibreNMS with rrdcached must know the rrdtool version to use
+# the "create over the daemon" codepath; validate.php flags a missing value.
+rrdtool_version="$(rrdtool --version 2>/dev/null | awk '{print $2; exit}' 2>/dev/null || echo 0)"
+su -s /bin/bash librenms -c "cd /opt/librenms && php lnms config:set rrdtool_version ${rrdtool_version}" >/dev/null 2>&1 \
+  || warn "failed to set rrdtool_version (${rrdtool_version})"
 [ -S /run/rrdcached.sock ] || die "rrdcached socket missing after startup"
 
 cat > /etc/php/${PHP_VER}/fpm/pool.d/librenms.conf <<'LIBPOOL'
@@ -958,9 +1034,20 @@ security.limit_extensions = .php
 ; and debugging, so open_basedir must NOT be restricted to the app tree here.
 LIBPOOL
 
-sed -e 's/^    listen      80;/    listen      '"${LX_LISTEN_ADDR}:${LX_SITE_PORT}"';/' \
+# Official docs: server listens on plain ":80" (all addresses) - once the
+# distro default site is gone this vhost is the only :80 listener, so it must
+# also answer requests to 127.0.0.1 / other NIC addresses (default_server).
+sed -e "s/^    listen      80;/    listen      ${LX_SITE_PORT} default_server;/" \
     -e 's/server_name.*;/server_name '"${LX_SITE_FQDN}"';/' \
     "${ROOTDIR}/deploy/templates/nginx-librenms.conf" > /etc/nginx/conf.d/librenms.conf
+
+# The distro ships /etc/nginx/sites-enabled/default (default_server on *:80,
+# root /var/www/html -> "Welcome to nginx!"). It would swallow every request
+# that lands on an address our vhost does not explicitly listen on (e.g.
+# 127.0.0.1), so LibreNMS' API/graphs would be unreachable there. The official
+# install docs remove it; with its :80 gone our conf.d vhost is the only site.
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
+nginx -t >/dev/null 2>&1 || die "nginx configuration test failed after removing default site"
 
 # =============================================================================
 log "== Phase 4: Oxidized (Ruby daemon + REST :8888) ========================"
