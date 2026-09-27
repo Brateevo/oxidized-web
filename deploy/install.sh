@@ -650,7 +650,7 @@ mysql -N -B -e "SELECT d.hostname, s.type, s.storage_descr FROM \`__DBNAME__\`.d
 done
 exit 0
 RDDIR
-sed -i "s/__DBNAME__/${LX_DB_NAME}/" /usr/local/sbin/librenms-rrd-dirs
+sed -i "s/__DBNAME__/${LX_DB_NAME}/g" /usr/local/sbin/librenms-rrd-dirs
 chmod 755 /usr/local/sbin/librenms-rrd-dirs
 /usr/local/sbin/librenms-rrd-dirs
 
