@@ -639,6 +639,15 @@ for h in ${HOSTS}; do
   mkdir -p "${RD}/${h}"
   chown -R librenms:librenms "${RD}/${h}"
 done
+# storage sensors keep '/' in storage_descr (e.g. "/share/Veeam"). Rrd::name()
+# then produces paths like <host>/storage-<type>-/share/Veeam.rrd, and the
+# rrdtool CLI realpath() needs every intermediate dir to pre-exist on disk too.
+mysql -N -B -e "SELECT d.hostname, s.type, s.storage_descr FROM \`__DBNAME__\`.devices d INNER JOIN \`__DBNAME__\`.storage s ON s.device_id = d.device_id WHERE s.storage_descr LIKE '%/%'" 2>/dev/null | while read -r h typ d; do
+  [ -n "$h" ] && [ -n "$d" ] || continue
+  full="storage-${typ}-${d}"
+  mkdir -p "${RD}/${h}/$(dirname "${full}")"
+  chown -R librenms:librenms "${RD}/${h}/$(dirname "${full}")"
+done
 exit 0
 RDDIR
 sed -i "s/__DBNAME__/${LX_DB_NAME}/" /usr/local/sbin/librenms-rrd-dirs
@@ -955,7 +964,7 @@ setfacl -d -m g::rwx /opt/librenms/rrd /opt/librenms/logs /opt/librenms/storage 
 # "systemctl enable --now" skips restarting an already-active service, so we
 # restart explicitly below. (SOCKFILE defaults to /var/run/rrdcached.sock which
 # symlinks to /run - LibreNMS is told exactly that path via lnms config:set.)
-rrdcached_set() { sed -i "s/^#\?${1}=.*/${1}=${2}/" /etc/default/rrdcached; }
+rrdcached_set() { sed -i "s|^#\?${1}=.*|${1}=${2}|" /etc/default/rrdcached; }
 # run the daemon as the app user, not root: otherwise RRDs land with
 # root:root ownership and the unprivileged librenms poller cannot read/write
 # them (graphs come back empty / "Permission denied"). This matches the current
@@ -996,13 +1005,16 @@ stat -c '%G' /run/rrdcached.sock 2>/dev/null | grep -qx "librenms" \
 # NOTE: the rrdtool CLI (which LibreNMS spawams via RrdProcess) does a LOCAL
 # realpath() before it talks to the daemon, so the per-device subdir must exist
 # on disk even though the daemon has -R. Hence we create the test RRD inside a
-# fresh subdir to reproduce the real LibreNMS create path.
+# fresh subdir to reproduce the real LibreNMS create path. RrdProcess runs with
+# cwd = rrd dir, so run this smoke test from there too - from any other dir the
+# CLI's local realpath() resolves __installer_test__ against a non-existent
+# path and fails the test even though the daemon backend is perfectly fine.
 mkdir -p /opt/librenms/rrd/__installer_test__
 chown librenms:librenms /opt/librenms/rrd/__installer_test__
-rrdtool create __installer_test__/probe.rrd --step 300 --daemon unix:/run/rrdcached.sock \
-  DS:t:GAUGE:600:0:U RRA:AVERAGE:0.5:1:2 >/dev/null 2>&1 \
+(cd /opt/librenms/rrd && rrdtool create __installer_test__/probe.rrd --step 300 --daemon unix:/run/rrdcached.sock \
+  DS:t:GAUGE:600:0:U RRA:AVERAGE:0.5:1:2) >/dev/null 2>&1 \
   || die "rrdcached cannot create RRDs (BASE_PATH or -R flag wrong)"
-rrdtool update __installer_test__/probe.rrd --daemon unix:/run/rrdcached.sock N:1 >/dev/null 2>&1 \
+(cd /opt/librenms/rrd && rrdtool update __installer_test__/probe.rrd --daemon unix:/run/rrdcached.sock N:1) >/dev/null 2>&1 \
   || die "rrdtool update through rrdcached failed"
 rm -rf /opt/librenms/rrd/__installer_test__
 # tell LibreNMS to read/write RRDs through the daemon (validate.php wants it)
