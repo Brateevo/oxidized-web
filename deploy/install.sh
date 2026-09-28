@@ -709,7 +709,22 @@ if [ -f "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_detection/asust
   log "installed ASUSTOR OS definitions (os=asustor detection)"
 fi
 
-# Fix RrdPath sanitization (LibreNMS 26.9.x): sanitize filename only, keep directory separator
+# Fix RRD filename sanitization (LibreNMS 26.9.1, regression #18788).
+#
+# Upstream commit dc15534aec introduced LibreNMS/RRD/RrdPath.php whose
+# __construct() sanitized only the hostname, leaving every character of the
+# storage descr in the filename. "system disk" / "/share/User Homes" then
+# reached rrdtool as several arguments and rrdcached rejected the command:
+#   RRD Error rrdcached@unix:/run/rrdcached.sock: Usage: CREATE <filename> ...
+#   RrdUnknownException Usage: rrdtool last [--daemon|-d <addr>] <file>
+# so the RRD was never written and the web graph returned HTTP 500.
+#
+# As of 9a7aa6adcd upstream reverted dc15534aec and Rrd::name() in
+# LibreNMS/Data/Store/Rrd.php sanitizes the whole name again, which fixes it
+# properly. This guard is therefore dormant on current releases and only
+# applies if RrdPath.php ever comes back: it runs safeName() on the filename
+# while keeping DIRECTORY_SEPARATOR, so the file still lands in the
+# per-device directory instead of a flat "<host>_<name>.rrd" at the rrd root.
 RrdPathFix() {
   local f=/opt/librenms/LibreNMS/RRD/RrdPath.php
   [ -f "$f" ] || return 0
