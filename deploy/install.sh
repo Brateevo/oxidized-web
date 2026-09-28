@@ -639,15 +639,11 @@ for h in ${HOSTS}; do
   mkdir -p "${RD}/${h}"
   chown -R librenms:librenms "${RD}/${h}"
 done
-# storage sensors keep '/' in storage_descr (e.g. "/share/Veeam"). Rrd::name()
-# then produces paths like <host>/storage-<type>-/share/Veeam.rrd, and the
-# rrdtool CLI realpath() needs every intermediate dir to pre-exist on disk too.
-mysql -N -B -e "SELECT d.hostname, s.type, s.storage_descr FROM \`__DBNAME__\`.devices d INNER JOIN \`__DBNAME__\`.storage s ON s.device_id = d.device_id WHERE s.storage_descr LIKE '%/%'" 2>/dev/null | while read -r h typ d; do
-  [ -n "$h" ] && [ -n "$d" ] || continue
-  full="storage-${typ}-${d}"
-  mkdir -p "${RD}/${h}/$(dirname "${full}")"
-  chown -R librenms:librenms "${RD}/${h}/$(dirname "${full}")"
-done
+# NOTE: storage RRD names are produced by Rrd::name() which now sanitizes the
+# whole filename (RrdPath::make above), so '/share/Veeam' becomes
+# 'storage-hrstorage-_share_Veeam.rrd' inside the per-device dir - no
+# intermediate directories and no spaces left for the rrdtool CLI to
+# choke on ('Usage: CREATE' / 'Usage: rrdtool last' errors, blank graphs).
 exit 0
 RDDIR
 sed -i "s/__DBNAME__/${LX_DB_NAME}/g" /usr/local/sbin/librenms-rrd-dirs
@@ -712,6 +708,31 @@ if [ -f "${ROOTDIR}/deploy/asustor-defs/resources/definitions/os_detection/asust
   install -D -o librenms -g librenms -m 0644 "${ROOTDIR}/deploy/asustor-defs/html/images/os/asustor.svg" /opt/librenms/html/images/os/asustor.svg
   log "installed ASUSTOR OS definitions (os=asustor detection)"
 fi
+
+# Fix RrdPath sanitization (LibreNMS 26.9.x): sanitize filename only, keep directory separator
+RrdPathFix() {
+  local f=/opt/librenms/LibreNMS/RRD/RrdPath.php
+  [ -f "$f" ] || return 0
+  python3 - "$f" <<'RRPY'
+import sys, io
+p = sys.argv[1]
+d = io.open(p, encoding="utf-8").read()
+i = d.find("private function __construct")
+if i >= 0:
+    j = d.find(";", i)
+    if j >= 0:
+        new = (
+            "private function __construct(string $hostname, string $filename)\n"
+            "    {\n"
+            "        $this->relativePath = Rrd::safeName(trim($hostname, '[]'))"
+            " . ($filename ? DIRECTORY_SEPARATOR . Rrd::safeName($filename) : '');"
+        )
+        d2 = d[:i] + new + d[j + 1:]
+        if d2 != d:
+            io.open(p, "w", encoding="utf-8").write(d2)
+RRPY
+}
+RrdPathFix
 
 # --- enable Oxidized integration inside LibreNMS config.php ------------------
 LX_CFG=/opt/librenms/config.php
