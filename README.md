@@ -208,26 +208,20 @@ sudo bash apply-maps.sh --root /opt/librenms      # если LibreNMS в дру�
 - Креды БД берёт из `.env` LibreNMS (`DB_DATABASE/DB_USERNAME/DB_PASSWORD`),
   поэтому отдельной настройки не требует.
 
-## Ручная установка oxidized-web (пошагово)
+## Установка oxidized-web
 
-Если **LibreNMS + Oxidized уже стоят** и нужно развернуть только веб-интерфейс —
-пошаговая инструкция ниже. Для стек «с нуля» используйте [интерактивный мастер](#-установка-всего-стека-одной-командой-интерактивный-мастер).
+Инструкция только для веб-интерфейса — LibreNMS и Oxidized должны быть уже установлены
+(иначе [интерактивный мастер](#-установка-всего-стека-одной-командой-интерактивный-мастер)).
 
-**Предпосылки**
-
-- LibreNMS установлен, доступна его MySQL-база (`librenms`).
-- Oxidized запущен и его REST API отвечает (по умолчанию `127.0.0.1:8888`):
-  ```bash
-  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8888/nodes   # ожидаем 200
-  ```
-- nginx, PHP-FPM (8.5+), PHP-расширения `pdo_mysql`, `sqlite3`.
-
-Ниже `PHP_VER=8.5` — замените на свою версию (`ls /etc/php/`).
+Требуется: LibreNMS с MySQL-базой `librenms`, работающий Oxidized
+(`curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8888/nodes` → `200`),
+nginx и PHP-FPM 8.5+ с расширениями `pdo_mysql` и `sqlite3`.
+`PHP_VER` — ваша версия PHP (`ls /etc/php/`), например `8.5`.
 
 ### 1. Скопировать приложение
 
 ```bash
-sudo mkdir -p /opt/oxidized-web /opt/oxidized-web/data/sessions
+sudo mkdir -p /opt/oxidized-web/data/sessions
 sudo cp -r public src /opt/oxidized-web/
 sudo cp config.example.php /opt/oxidized-web/config.php   # затем впишите OX_LX_PASS
 sudo chown -R www-data:www-data /opt/oxidized-web
@@ -240,13 +234,15 @@ sudo chmod 640 /opt/oxidized-web/config.php
 Приложению нужны только `SELECT` на `devices` и `locations`:
 
 ```bash
-mysql -e "CREATE USER IF NOT EXISTS 'oxidized_web'@'127.0.0.1' IDENTIFIED BY '<ПАРОЛЬ>';"
-mysql -e "CREATE USER IF NOT EXISTS 'oxidized_web'@'localhost'  IDENTIFIED BY '<ПАРОЛЬ>';"
-mysql -e "GRANT SELECT ON librenms.devices   TO 'oxidized_web'@'127.0.0.1';"
-mysql -e "GRANT SELECT ON librenms.locations TO 'oxidized_web'@'127.0.0.1';"
-mysql -e "GRANT SELECT ON librenms.devices   TO 'oxidized_web'@'localhost';"
-mysql -e "GRANT SELECT ON librenms.locations TO 'oxidized_web'@'localhost';"
-mysql -e "FLUSH PRIVILEGES;"
+DB_PASS="$(openssl rand -base64 18)"
+sudo mysql -e "CREATE USER IF NOT EXISTS 'oxidized_web'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+                CREATE USER IF NOT EXISTS 'oxidized_web'@'localhost'  IDENTIFIED BY '${DB_PASS}';
+                GRANT SELECT ON librenms.devices   TO 'oxidized_web'@'127.0.0.1';
+                GRANT SELECT ON librenms.devices   TO 'oxidized_web'@'localhost';
+                GRANT SELECT ON librenms.locations TO 'oxidized_web'@'127.0.0.1';
+                GRANT SELECT ON librenms.locations TO 'oxidized_web'@'localhost';
+                FLUSH PRIVILEGES;"
+echo "пароль БД: ${DB_PASS}"   # он же пойдёт в OX_LX_PASS на шаге 3
 ```
 
 ### 3. Реальный `config.php`
@@ -287,86 +283,21 @@ php_admin_value[post_max_size]           = 4M
 
 ### 5. Виртуальный хост nginx
 
-Готовый шаблон — `deploy/templates/nginx-oxidized-web.conf`. Скопируйте в
-`/etc/nginx/conf.d/oxidized-web.conf` и подставьте адрес в первой строке:
-
-```nginx
-server {
-    listen 10.0.0.10:8889;      # <SERVER_IP>:8889 — или 127.0.0.1:8889 для доступа только через SSH-туннель
-    server_name _;
-    root /opt/oxidized-web/public;
-    index index.php;
-    # ... остальное как в deploy/templates/nginx-oxidized-web.conf
-}
-```
-
 ```bash
+sudo cp deploy/templates/nginx-oxidized-web.conf /etc/nginx/conf.d/oxidized-web.conf
+# подставьте свой IP: 10.0.0.10 — любой адрес, с которого будете открывать панель
+sudo sed -i "s|listen <SERVER_IP>:8889;|listen 10.0.0.10:8889;|" /etc/nginx/conf.d/oxidized-web.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-> Порт 8889 на эталонной установке слушают **только на IP хоста** — REST API Oxidized
-> (`:8888`) не имеет своей авторизации и намеренно оставлен на loopback, а сам веб-интерфейс
-> закрыт логином. Если хост доступен извне — настройте TLS и ограничьте порт файрволом:
-> ```bash
-> sudo ufw allow from 10.0.0.0/8 to any port 8889 proto tcp
-> ```
-
-### 6. Первый администратор
-
-Откройте `http://<SERVER_IP>:8889` — сработает мастер **`/setup`** («Создайте первого
-администратора»). Или создайте админа сразу в SQLite:
+### 6. Запуск и первый администратор
 
 ```bash
-sudo -u www-data php -r '
-  require "/opt/oxidized-web/src/database.php";
-  DB::pdo()->prepare("INSERT INTO users (username,password_hash,role) VALUES (?,?,?)")
-    ->execute(["admin", password_hash("ВАШ_ПАРОЛЬ", PASSWORD_DEFAULT), "admin"]);
-  echo "ok\n";'
+sudo systemctl restart "php${PHP_VER}-fpm"
 ```
 
-> Форс-смены пароля в приложении нет — если пароль временный, смените его после входа
-> на странице «Пользователи» (`/users`).
-
-### 7. Проверка
-
-```bash
-sudo -u www-data php -l /opt/oxidized-web/src/oxidized.php
-curl -s -o /dev/null -w 'oxidized-web: %{http_code}\n' http://<SERVER_IP>:8889/
-curl -s -o /dev/null -w 'oxidized REST: %{http_code}\n' http://127.0.0.1:8888/nodes
-```
-
-## Диагностика
-
-- **Колонка «Локация» пустая у всех устройств** — нет `GRANT SELECT` на `librenms.locations`
-  (`SELECT command denied` → fallback `-`). См. шаг 2.
-- **Веб-интерфейс не открывается** — проверьте, что `listen` в vhost совпадает с адресом
-  доступа, и что порт не блокирует файрвол (`ufw`/`nft`).
-- **Oxidized падает в цикле** с `no implicit conversion of String into Integer`
-  (`/etc/oxidized/crash`, трасса `source.rb` ← `jsonfile.rb`) и в статусе знак `Z` — значит
-  LibreNMS вернул JSON-объект вместо массива, т.е. **401 `{"message":"Unauthenticated."}`**.
-  Виноват API-токен, читайте два следующих пункта.
-- **401 на `GET /api/v0/oxidized`** — неверный токен. Проверьте строку в `/etc/oxidized/config`:
-  ```bash
-  grep -A1 headers /etc/oxidized/config
-  curl -s -o /dev/null -w '%{http_code}\n' -H "X-Auth-Token: <ТОКЕН>" http://127.0.0.1/api/v0/oxidized
-  ```
-  Гард `X-Auth-Token` в LibreNMS (`App\Models\ApiToken`) сравнивает токен **напрямую** с
-  `api_tokens.token_hash` (значение хранится как есть, не хэш). Важно: в части версий
-  LibreNMS команда `php artisan api:token-create` пишет токен в Sanctum-таблицу
-  `personal_access_tokens`, которую этот гард **не читает** — тогда токен не работает.
-  Надёжный способ — создать запись прямо в `api_tokens`:
-  ```bash
-  TOK="$(openssl rand -hex 16)"
-  mysql -e "INSERT INTO librenms.api_tokens (user_id, token_hash, description, disabled) \
-            VALUES (1, '${TOK}', 'oxidized', 0);"
-  # 1 = user_id администратора LibreNMS (проверьте: SELECT user_id,username FROM librenms.users)
-  sudo sed -i "s|X-Auth-Token: '.*'|X-Auth-Token: '${TOK}'|" /etc/oxidized/config
-  sudo systemctl restart oxidized
-  ```
-  Токен можно проверить из веб-интерфейса LibreNMS (шестерёнка → API) или SQL:
-  ```sql
-  SELECT id,user_id,description,disabled FROM librenms.api_tokens;
-  ```
+Откройте `http://<ВАШ_IP>:8889` — сработает мастер **`/setup`** («Создайте первого
+администратора»). Готово.
 
 ## Пошагово: как работает интеграция
 
