@@ -1,237 +1,67 @@
-# OxidizedWeb — LibreNMS + Oxidized
+# OxidizedWeb
 
-Web-интерфейс поверх **Oxidized** (резервное копирование конфигураций сетевых устройств)
-с данными из **LibreNMS** (инвентаризация, имена, локации) плюс **полный one-shot
-интерактивный установщик** всего стека на голый Linux.
+Веб-интерфейс к [Oxidized](https://github.com/ytti/oxidized) — системе резервного
+копирования конфигураций сетевого оборудования.
+
+## Что такое Oxidized
+
+Oxidized — демон, который:
+
+- обходит сетевые устройства по SSH/Telnet и забирает их конфигурации;
+- хранит конфиги в git: каждый узел — отдельный файл, каждое изменение — коммит
+  с возможностью откатиться на любую версию;
+- отдаёт список устройств и конфигурации по REST API.
+
+`oxidized-web` добавляет к этому браузерный интерфейс: список устройств, просмотр
+и сравнение версий конфигураций, пользователей с ролями и API-токены.
 
 ## Скриншоты
 
-Страница входа (`/login`):
+Вход:
 
 ![Вход — OxidizedWeb](docs/screenshots/oxidized-web-login.png)
 
-Дашборд устройств (`/`) — Имя / Локация / IP замаскированы (модель, время бэкапа и статус видны):
+Список устройств:
 
-![Дашборд устройств — OxidizedWeb](docs/screenshots/oxidized-web-dashboard.png)
+![Устройства — OxidizedWeb](docs/screenshots/oxidized-web-dashboard.png)
 
-## Состав репозитория
+## Возможности
 
-| Путь | Назначение |
-|------|------------|
-| `deploy/install.sh` | **One-shot интерактивный мастер**: ставит весь стек (MariaDB, LibreNMS, Oxidized, nginx, php-fpm, oxidized-web) на голый Debian 12 / Ubuntu 22.04 / 24.04, опрашивая обо всех параметрах |
-| `deploy/apply-maps.sh` | **Автономный скрипт переключения карт** на любой уже существующей LibreNMS (Yandex/OpenStreetMap подложка, Yandex/Google кнопка «Map»), идемпотентный |
-| `deploy/templates/nginx-librenms.conf` | Эталонный виртуальный хост nginx для LibreNMS (используется шаблонами установщика) |
-| `deploy/templates/nginx-oxidized-web.conf` | Эталонный виртуальный хост nginx для oxidized-web |
-| `config.example.php` | Шаблон `config.php` oxidized-web. **Скопируйте в `config.php`** и укажите пароль. Реальный `config.php` в git не попадает (`.gitignore`) |
-| `src/oxidized.php` | Ядро интеграции: REST-клиент Oxidized (`/nodes`, `/node/fetch`, версии, diff), helpers `oxz_sysname()` и `oxz_location()` |
-| `public/index.php` | Front-controller: роутер, таблица устройств (`/`), `/config`, `/versions`, `/version`, `/diff`, `/users`, `/login` |
-| `apk/OxidizedMobile-v1.3.apk` | Готовое мобильное приложение OxidizedMobile (Android APK, v1.3) |
-| `.gitignore` | Исключает `config.php`, `.env`, БД (`data/*.db`), keystore'ы, кэши и локальные файлы |
+- Список узлов: имя, модель, группа, IP, время последнего бэкапа, статус.
+- Просмотр текущей конфигурации узла — `/config`.
+- История версий и сравнение (diff) любых двух версий — `/versions`, `/diff`.
+- Пользователи с ролями `admin` / `user`; для `user` можно ограничить видимые устройства.
+- API-токены (Bearer) для автоматизации и внешних интеграций.
+- Первичная настройка через мастер `/setup`.
+- Безопасность: пароли `bcrypt`, CSRF-токены, блокировка после 5 неудачных попыток
+  входа на 15 минут.
 
-## Как это устроено (архитектура)
+## Требования
 
-```
-LibreNMS ──(inventory: MySQL devices/locations)──► OxidizedWeb (PHP, port 8889)
-    │                                                   │
-    │ (built-in Oxidized integration)                   │ pulls REST
-    ▼                                                   ▼
- Oxidized ────────────────(REST API :8888)───────────► /\nodes.json, /node/fetch
-    │
-    ▼
- configs backup (git storage)
-```
+- **Oxidized** запущен и отвечает по REST API (по умолчанию `http://127.0.0.1:8888`):
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8888/nodes   # ожидаем 200
+  ```
+- **nginx** и **PHP-FPM 8.5+** с расширениями `pdo_mysql`, `sqlite3`, `curl`, `mbstring`.
+- **База данных с инвентарём устройств** (имён и локаций) — по умолчанию LibreNMS,
+  база `librenms`, таблицы `devices` и `locations`.
 
-1. **LibreNMS** — система мониторинга/инвентаризации. В её MySQL живут таблицы
-   `devices` (IP, hostname, sysName, `location_id`) и `locations` (названия локаций).
-2. **Oxidized** — демон резервного копирования конфигов. LibreNMS сама передаёт ему
-   список устройств (встроенная интеграция), Oxidized хранит конфиги в git.
-3. **OxidizedWeb** — кастомный PHP-фронтенд: **читает** Oxidized по REST API и
-   **обогащает** список устройств данными из БД LibreNMS (константы `OX_LX_*`).
+`PHP_VER` в командах ниже — ваша версия PHP (`ls /etc/php/`), например `8.5`.
 
-## 🔧 Установка всего стека одной командой (интерактивный мастер)
-
-Скрипт `deploy/install.sh` ставит **всё с нуля** на голый сервер и в процессе
-**задаёт вопросы по каждому параметру**. Нажатие Enter = значение по умолчанию,
-пустой ввод для пароля = автоматическая генерация.
-
-Мастер отрисовывается диалоговыми окнами `dialog`/`whiptail`:
-синий заголовок, тело сообщения и кнопки `< Yes >` / `< No >`. Если `dialog` нет
-(или запуск без tty — например, повторный автопрогон), автоматически
-используются обычные текстовые промпты.
-
-### Шаг 1. Подготовка сервера
-
-```bash
-# Свежий Debian 12 / Ubuntu 22.04 / 24.04 (amd64). От root:
-apt-get update && apt-get install -y git curl
-git clone https://github.com/Brateevo/oxidized-web.git /opt/oxidized-web
-cd /opt/oxidized-web
-```
-
-### Шаг 2. Запуск
-
-```bash
-sudo bash deploy/install.sh
-```
-
-Мастер встречает диалоговым окном (dialog/whiptail) с кнопками `< Yes >` / `< No >`,
-далее — окна ввода параметров (Enter = значение по умолчанию, пустой ввод для
-пароля = автогенерация):
-
-![Мастер установки — install.sh](docs/install-wizard.png)
-
-### Шаг 3. Какие вопросы задаёт мастер (и что вставляет по ответам)
-
-| Вопрос (промпт) | По умолчанию | Куда вставляется |
-|---|---|---|
-| Имя БД LibreNMS | `librenms` | CREATE DATABASE, `.env`, `config.php` |
-| MySQL-логин для LibreNMS | `librenms` | CREATE USER + GRANT ALL, `.env` |
-| **Пароль MySQL LibreNMS** | случайный | GRANT, `.env` |
-| MySQL-аккаунт oxidized-web (read-only) | `oxidized_web` | CREATE USER + GRANT SELECT, `config.php` |
-| **Пароль oxidized-web (MySQL)** | случайный | точечные GRANT на `devices`/`locations`, `config.php` |
-| **Пароль админа LibreNMS** | случайный | `php artisan user:add --role=admin` |
-| Логин админа LibreNMS | `admin` | `php artisan user:add` |
-| Email админа LibreNMS | `admin@localhost` | `php artisan user:add` |
-| **Пароль админа oxidized-web** | случайный | SQLite `users` (при первом запуске) |
-| Логин админа oxidized-web | `admin` | SQLite `users` |
-| IP/домен LibreNMS (nginx) | первый IP хоста | `listen`, `server_name`, `.env APP_URL` |
-| Порт LibreNMS nginx | `80` | `listen`, APP_URL |
-| IP/домен oxidized-web | как у LibreNMS | `listen`, `server_name` |
-| Порт oxidized-web nginx | `8889` | `listen` |
-| Oxidized REST host (bind) | `127.0.0.1` | `/etc/oxidized/config` (только loopback: REST API без собственной авторизации) |
-| Oxidized REST порт | `8888` | `/etc/oxidized/config`, `config.php` LibreNMS |
-| Группа Oxidized по умолчанию | `default` | `config.php` LibreNMS |
-| FQDN для исходящих ссылок (base_url) | `http://<IP>` | `.env APP_URL` (порт подставляется автоматически) |
-
-> Все ответы сохраняются в `/root/oxidized-web-deploy.secrets` (`chmod 600`) —
-> пароли не печатаются в лог и не зашиты в репозиторий.
-
-### Шаг 4. Что делает скрипт по фазам
-
-1. **Phase 0 — база**: сначала выбирается и ставится самая свежая **PHP 8.5+** (через
-   `ppa:ondrej/php`, весь набор модулей `pdo_mysql`, `curl`, `sqlite3`, `mbstring`, `redis` и др.),
-   которая фиксируется в альтернативах и поверх которой резолвятся виртуальные зависимости
-   (`php-cli` от composer) — Ubuntu-строки 8.3/8.4 не подтягиваются. Затем `apt-get` ставит
-   nginx, MariaDB, Redis, PHP-FPM (+ модули), rrdtool, snmp, composer, ruby, git.
-   PHP-версия определяется автоматически.
-2. **Phase 1 — MariaDB**: создаёт БД `librenms`, пользователя `librenms` (`ALL`) и
-   read-only `oxidized_web` (только `SELECT` на нужные столбцы `devices` и `locations`,
-   только для `127.0.0.1`).
-3. **Phase 2 — LibreNMS**: `git clone` в `/opt/librenms`, `composer install`,
-   `.env` с ответами мастера, `artisan migrate`, cron (poller/discovery/alerts),
-   создание первого админа, включение интеграции Oxidized и REST API в `config.php`.
-4. **Phase 3 — nginx + php-fpm**: пул `librenms` (сокет `/run/php-fpm-librenms.sock`)
-   и виртуальный хост из шаблона с IP/портом из мастера.
-5. **Phase 4 — Oxidized**: `gem install oxidized`, `/etc/oxidized/config`
-   (REST со значениями мастера, source = `http://<IP>:<port>/api/v0/oxidized`),
-   systemd-юнит `oxidized.service`.
-6. **Phase 5 — oxidized-web**: копирует `public/` и `src/` в `/opt/oxidized-web`,
-   генерирует реальный `config.php`, пул `oxidized` (сокет
-   `/run/php-fpm-oxidized.sock`), nginx-хост на порту 8889.
-7. **Phase 6 — старт + админы**: проверка конфигурации и рестарт php-fpm/nginx,
-   создание заданного admin oxidized-web только если такого логина ещё нет.
-8. **Verify**: обязательные службы, конфиги nginx/php-fpm, PHP-модули, MySQL-схема
-   и права приложения, LibreNMS API-токен, HTTP-ответы обоих сайтов.
-
-### Шаг 5. После установки (чек-лист)
-
-- [ ] Открыть `http://<IP>` — зайти в LibreNMS администратором (логин из мастера),
-      проверить, что установка прошла полностью (Веб: `Settings` → `General` → `Overview`).
-- [ ] Добавить устройства в LibreNMS (`Devices → Add Device`).
-- [ ] Oxidized подхватит их автоматически через `/api/v0/oxidized` и начнёт бэкап.
-- [ ] Открыть `http://<IP>:8889` — в таблице устройств видны имя, модель, **Локация**, IP,
-      статус и время бэкапа (см. [Скриншоты](#скриншоты)).
-- [ ] Вписать рабочие SSH/ENABLE доступы устройств в `/etc/oxidized/config` (верхний блок
-      `username/password/vars.enable`) и перезапустить Oxidized.
-- [ ] Если хост доступен извне — настроить TLS (nginx) и ограничить порт 8889.
-
-### Карты LibreNMS (подложка и кнопка «Map»)
-
-При установке `deploy/install.sh` спрашивает два параметра:
-
-- **Подложка карт LibreNMS** (`LX_MAP_VIEW`): `openstreetmap` или `yandex`.
-  Оба варианта отдаются через `fullscreen.blade.php` (`@json($tile_url)`), метод
-  контроллера сделан `public` — карты полноэкранной страницы работают в любом случае.
-- **Сервис кнопки «Map»** у координат устройства (`LX_MAP_LINK`): `yandex` или
-  `google`. Заменяет ссылку в `system.blade.php` и обработчик перетаскивания
-  маркера в `geo-map.blade.php`.
-
-Выбранные значения сохраняются в `/root/oxidized-web-deploy.secrets`; повторный
-запуск установщика использует их как дефолты и идемпотентно переприменяет правки.
-
-Если выбрана **Yandex** подложка, применяется корректировка EPSG:3395:
-
-```
-https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.06.20&x={x}&y={y}&z={z}&scale=1&lang=ru_RU
-```
-
-- Тайлы Яндекса отдаются в **эллипсоидном** меркаторе (EPSG:3395), а Leaflet по
-  умолчанию рисует их в сферическом (EPSG:3857) — без коррекции маркеры и карта
-  смещены примерно на 0.18° широты (≈20 км к северу).
-- В `html/js/librenms.js` добавляется кастомный CRS `L.CRS.EPSG3395` (forward/unproject
-  на эллипсоиде WGS84), который включается автоматически для URL
-  `core-renderer-tiles.maps.yandex.net` и передаётся в `L.map(id, { crs })`.
-
-> Все правки (кастомный CRS, `@json($tile_url)`, `public fullscreenMap`, ссылка
-> на Яндекс.Карты, версия ассета) **применяет `deploy/install.sh` идемпотентно** на
-> каждом запуске. Поэтому после `git pull`/апгрейда LibreNMS достаточно просто
-> перезапустить установщик — патчи наложатся снова. Вручную (без установщика)
-> патчи из раздела «Ручная установка» ниже нужно повторять после апгрейда.
-
-### Переключить карты на уже установленной LibreNMS (`deploy/apply-maps.sh`)
-
-Если стек уже стоит и установщик не нужен — карты переключаются автономным
-скриптом на **любой** LibreNMS-инсталляции (не обязательно созданной этим
-репозиторием):
-
-```bash
-# скачать с Git и запустить (нужны root, mysql и python3 на сервере)
-curl -O https://raw.githubusercontent.com/Brateevo/oxidized-web/main/deploy/apply-maps.sh
-sudo bash apply-maps.sh                           # интерактивно, Yandex по умолчанию
-sudo bash apply-maps.sh --view yandex --link yandex   # подложка Yandex + кнопка «Map» Yandex
-sudo bash apply-maps.sh --view openstreetmap --link google   # откат к OSM + Google
-sudo bash apply-maps.sh --root /opt/librenms      # если LibreNMS в другом каталоге
-```
-
-Что делает скрипт (спека распознаётся автоматически):
-
-- **Подложка** (`--view yandex|openstreetmap`): пишет/удаляет `leaflet.tile_url`
-  в БД LibreNMS (Yandex core-renderer), накладывает или откатывает патч EPSG:3395
-  в `html/js/librenms.js`, правит `fullscreen.blade.php` (`@json($tile_url)`) и
-  делает `fullscreenMap()` публичным — скрытые или изменённые при апгрейде места
-  чинятся снова.
-- **Кнопка «Map»** (`--link yandex|google`): заменяет ссылку координат в
-  `system.blade.php` и обработчик перетаскивания маркера в `geo-map.blade.php`.
-- Сбрасывает кеши (view/cache/config) и восстанавливает владельца файлов.
-- **Идемпотентен**: повторный запуск безопасен, при изменении подложки
-  предыдущие патчи корректно откатываются.
-- Креды БД берёт из `.env` LibreNMS (`DB_DATABASE/DB_USERNAME/DB_PASSWORD`),
-  поэтому отдельной настройки не требует.
-
-## Установка oxidized-web
-
-Инструкция только для веб-интерфейса — LibreNMS и Oxidized должны быть уже установлены
-(иначе [интерактивный мастер](#-установка-всего-стека-одной-командой-интерактивный-мастер)).
-
-Требуется: LibreNMS с MySQL-базой `librenms`, работающий Oxidized
-(`curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8888/nodes` → `200`),
-nginx и PHP-FPM 8.5+ с расширениями `pdo_mysql` и `sqlite3`.
-`PHP_VER` — ваша версия PHP (`ls /etc/php/`), например `8.5`.
+## Установка
 
 ### 1. Скопировать приложение
 
 ```bash
 sudo mkdir -p /opt/oxidized-web/data/sessions
 sudo cp -r public src /opt/oxidized-web/
-sudo cp config.example.php /opt/oxidized-web/config.php   # затем впишите OX_LX_PASS
+sudo cp config.example.php /opt/oxidized-web/config.php
 sudo chown -R www-data:www-data /opt/oxidized-web
 sudo chown root:www-data /opt/oxidized-web/config.php
 sudo chmod 640 /opt/oxidized-web/config.php
 ```
 
-### 2. Read-only учётка MySQL в LibreNMS
-
-Приложению нужны только `SELECT` на `devices` и `locations`:
+### 2. Учётка БД только на чтение
 
 ```bash
 DB_PASS="$(openssl rand -base64 18)"
@@ -245,7 +75,7 @@ sudo mysql -e "CREATE USER IF NOT EXISTS 'oxidized_web'@'127.0.0.1' IDENTIFIED B
 echo "пароль БД: ${DB_PASS}"   # он же пойдёт в OX_LX_PASS на шаге 3
 ```
 
-### 3. Реальный `config.php`
+### 3. Заполнить `config.php`
 
 ```php
 <?php
@@ -258,7 +88,7 @@ const OX_LX_PASS = '<ПАРОЛЬ из шага 2>';
 
 ### 4. Пул php-fpm
 
-`/etc/php/${PHP_VER}/fpm/pool.d/oxidized.conf` (тот же файл генерит `install.sh`, Phase 5):
+`/etc/php/${PHP_VER}/fpm/pool.d/oxidized.conf`:
 
 ```ini
 [oxidized]
@@ -285,7 +115,7 @@ php_admin_value[post_max_size]           = 4M
 
 ```bash
 sudo cp deploy/templates/nginx-oxidized-web.conf /etc/nginx/conf.d/oxidized-web.conf
-# подставьте свой IP: 10.0.0.10 — любой адрес, с которого будете открывать панель
+# подставьте свой адрес вместо 10.0.0.10
 sudo sed -i "s|listen <SERVER_IP>:8889;|listen 10.0.0.10:8889;|" /etc/nginx/conf.d/oxidized-web.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
@@ -296,54 +126,49 @@ sudo nginx -t && sudo systemctl reload nginx
 sudo systemctl restart "php${PHP_VER}-fpm"
 ```
 
-Откройте `http://<ВАШ_IP>:8889` — сработает мастер **`/setup`** («Создайте первого
-администратора»). Готово.
+Откройте `http://<ВАШ_IP>:8889` — сработает мастер **«Создайте первого
+администратора»**. Готово.
 
-## Пошагово: как работает интеграция
+## Как это работает
 
-### Oxidized (демон + REST)
-- Демон слушает REST API (`rest: <host>:<port>` из мастера, по умолчанию `127.0.0.1:8888`).
-- Эндпоинты, используемые приложением:
-  - `GET /nodes.json` — список узлов `[name, model, group, status, ip, time]` (`ox_nodes()`);
-  - `GET /node/fetch/<name>` — текущий конфиг (`ox_fetch_config()`);
-  - `GET /node/version.json?node_full=<name>` — история версий (`ox_versions()`);
-  - `GET /node/version/view?node=<name>&oid=<oid>` — содержимое версии (`ox_version_view()`).
-- Diff между версиями считается локально LCS-алгоритмом (`render_unified_diff()`).
+oxidized-web ничего не опрашивает по SSH — работа с устройствами целиком на Oxidized.
+Приложение использует его REST API:
 
-### LibreNMS → обогащение данных
-- Подключение к MySQL LibreNMS по `OX_LX_*` из `config.php`.
-- `oxz_sysname(string $ip): string` — `sysName` устройства, fallback — hostname:
-  ```sql
-  SELECT COALESCE(NULLIF(sysName, ''), hostname)
-  FROM devices WHERE ip = ? OR hostname = ? LIMIT 1
-  ```
-- `oxz_location(string $ip): string` — локация через `devices.location_id → locations.id`:
-  ```sql
-  SELECT COALESCE(NULLIF(l.location, ''), '-')
-  FROM devices d
-  LEFT JOIN locations l ON l.id = d.location_id
-  WHERE d.ip = ? OR d.hostname = ? LIMIT 1
-  ```
-- Любой сбой БД **не валит страницу**: функции глотают `Throwable` и возвращают
-  fallback (`$ip` / `'-'`).
+| Запрос | Что даёт |
+|---|---|
+| `GET /nodes.json` | список узлов: имя, модель, группа, статус, IP, время бэкапа |
+| `GET /node/fetch/<имя>` | текущая конфигурация узла |
+| `GET /node/version.json?node_full=<имя>` | история версий |
+| `GET /node/version/view?node=<имя>&oid=<oid>` | содержимое конкретной версии |
 
-### Фронтенд (public/index.php)
-- Front-controller: единственный `index.php` разбирает путь и рендерит страницы.
-- Главная (`GET /`): Имя, Модель, **Локация**, IP, Группа, время бэкапа, статус.
-  Для не-админов список фильтруется по `user_devices` (`filter_nodes_by_user()`).
-- Страницы: `/config`, `/versions`, `/version`, `/diff`, `/users`, `/login`, `/logout`.
-- Защита: авторизация (`require_auth()`), CSRF (`csrf_check()`), экранирование через `e()`.
+Diff между версиями считается локально. Имена и локации устройств берутся из базы
+данных (шаг 2) и подставляются в таблицу; при недоступной БД приложение не падает —
+подставляет `-`.
+
+## Где что лежит
+
+| Путь | Что это |
+|---|---|
+| `/opt/oxidized-web/public` | код фронтенда (front-controller `index.php`) |
+| `/opt/oxidized-web/src` | ядро: работа с БД, авторизация, клиент Oxidized REST |
+| `/opt/oxidized-web/config.php` | параметры подключения к БД (в `.gitignore`) |
+| `/opt/oxidized-web/data/oxidized.db` | SQLite: пользователи, привязки к устройствам, API-токены |
+| `/etc/nginx/conf.d/oxidized-web.conf` | виртуальный хост |
+| `/etc/php/<ver>/fpm/pool.d/oxidized.conf` | пул php-fpm |
+| `/etc/oxidized/config` | конфигурация самого Oxidized |
+| `/home/oxidized/configs` | git-репозиторий с сохранёнными конфигами |
+
+## Полезные команды
+
+```bash
+sudo systemctl restart oxidized        # перезапустить Oxidized после правки конфига
+sudo journalctl -u oxidized -f         # журнал Oxidized
+sudo systemctl restart php8.5-fpm      # перезапустить пул oxidized-web
+sudo tail -f /var/log/nginx/oxidized-web.error.log
+git -C /home/oxidized/configs log      # история изменений конфигураций
+```
 
 ## Мобильное приложение
 
-`apk/OxidizedMobile-v1.3.apk` — собранный Android APK (веб-представление). Исходники
-мобильной части (`OxidizedMobile`, `OxidizedPWA`) в этом репозитории не хранятся —
-залит только готовый артефакт.
-
-## Требования и ограничения
-
-- Целевой хост: Debian 12 / Ubuntu 22.04 / Ubuntu 24.04 (amd64), `apt-get`, root.
-- Требуется доступ к Ubuntu PPA `ondrej/php` на Ubuntu или репозиторию `packages.sury.org/php` на Debian; скрипт выбирает самую новую полную PHP-ветку от 8.5 и выше.
-- PHP 8.5+ с расширениями `pdo_mysql`, `curl`, `mbstring`, `sqlite3` (минимальная версия — 8.5 по официальным требованиям LibreNMS web).
-- Установщик идемпотентен: повторный запуск безопасен, уже созданные части пропускаются.
-- Пароли не попадают в репозиторий: `config.php`, `.env`, `data/*.db` — в `.gitignore`.
+`apk/OxidizedMobile-v1.3.apk` — готовый Android APK (веб-представление OxidizedWeb).
+Исходники мобильной части в этом репозитории не хранятся, залит только артефакт.
